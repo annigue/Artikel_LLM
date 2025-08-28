@@ -72,7 +72,8 @@ NEGATIVE_LIST_DE = [
     "In diesem Artikel", "abschließend", "insgesamt", "innovativ", "köstlich",
     "einfach zuzubereiten", "im Folgenden", "es ist wichtig zu beachten",
     "nachstehend", "zusammenfassend", "Fazit", "Revolutioniere", "Tauche ein", "Erfahre mehr über", 
-    "Auf eine Reise gehen durch", "spannende Einblicke", "Die Macht von", "Entfessele die Kraft"
+    "Auf eine Reise gehen durch", "spannende Einblicke", "Die Macht von", "Entfessele die Kraft",
+    "Meine erste Begegnung"
 ]
 
 SYSTEM_PROMPT_DE = """Du bist Redakteur:in für camp-kochen.de.
@@ -191,7 +192,16 @@ Text:
 {raw}
 """
 
-COHERENCE_LINE = "\n\nWICHTIG: Einleitung und „Hintergrund & Tipps“ bilden **eine** Erzählung; im Hintergrund zuerst **an die Einleitung andocken**, nicht neu anfangen."
+COHERENCE_LINE_STORY = (
+    "\n\nWICHTIG: Einleitung und „Hintergrund & Tipps“ bilden eine **einheitliche Szene**; "
+    "im Hintergrund zuerst **an die Einleitung andocken** (Übergangssatz), "
+    "alternativ sauber markierte Rückblende."
+)
+COHERENCE_LINE_TIPS = (
+    "\n\nWICHTIG: „Hintergrund & Tipps“ **ohne Anekdote eröffnen**. "
+    "Starte direkt mit 2–4 **konkreten Technik-/Praxis-Tipps**; "
+    "keine Formulierungen wie „Meine erste Begegnung …“."
+)
 
 # -------------------- Heuristiken + Struktur/SEO-Checks --------------------
 
@@ -271,33 +281,34 @@ def contains_destination(text: str, dest: str) -> bool:
         return True
     return dest.lower() in text.lower()
 
-def coherence_checks(md: str, destination: str) -> Dict[str, Any]:
+def coherence_checks(md: str, destination: str, bg_mode: str = "auto") -> Dict[str, Any]:
     intro = extract_section(md, "Einleitung")
     bg = extract_section(md, "Hintergrund & Tipps")
 
-    # Ziel in Einleitung & am Anfang des Hintergrunds
     intro_has_dest = contains_destination(intro, destination)
     bg_has_dest = contains_destination(bg[:200], destination) if bg else True
 
-    # Hintergrund beginnt mit Brücke / Anschluss an Einleitung
     first_bg_sentence = ""
     if bg:
         first_bg_sentence = re.split(r"[.!?]\s", bg.strip(), maxsplit=1)[0].lower()
-    bridge_markers = [
-        "meine erste begegnung", "ein paar tage zuvor", "später", "damals",
-        "hier", "dort"
-    ]
+    bridge_markers = ["meine erste begegnung","ein paar tage zuvor","später","damals","hier","dort"]
     bridge_ok = any(k in first_bg_sentence for k in bridge_markers) or (
         bool(destination) and destination.lower() in first_bg_sentence
     )
 
-    ok = intro_has_dest and bg_has_dest and bridge_ok
+    # Story-Modus verlangt Brücke + Ziel; Tips-Modus nicht.
+    if bg_mode == "story":
+        ok = intro_has_dest and bg_has_dest and bridge_ok
+    else:
+        ok = True  # im tips/auto (wenn auto → use_story False) erzwingen wir NICHT die Brücke
+
     return {
         "intro_has_dest": intro_has_dest,
         "bg_has_dest": bg_has_dest,
-        "bridge_ok": bridge_ok,
+        "bridge_ok": (bridge_ok if bg_mode == "story" else True),
         "ok": ok
     }
+
 
 # -------------------- Plausibilitäts-Checks --------------------
 
@@ -535,12 +546,32 @@ Text:
 {base_text}
 """
 
-def build_coherence_fix_prompt(base_text: str, destination: str, style: str, structure: str, consistency: str, negative: str) -> str:
-    dest_line = f"- Nenne **{destination}** in Einleitung **und** im ersten Satz von „Hintergrund & Tipps“.\n" if destination else ""
-    return f"""Bringe Einleitung und „Hintergrund & Tipps“ in eine **einheitliche Szene**:
-- Vermeide zwei konkurrierende Starts; nutze im Hintergrund einen Übergangssatz, der klar an die Einleitung andockt (z. B. „Meine erste Begegnung …“, „Ein paar Tage zuvor …“).
-{dest_line}- Behalte Struktur & YAML-SEO-Block bei. Entferne Floskeln (vermeide: {negative}). Ich-Perspektive beibehalten.
-- Nutze konsistentes Vokabular: „Camper“, „Kocher“, „Pfanne“.
+def build_coherence_fix_prompt(base_text: str, destination: str, style: str, structure: str,
+                               consistency: str, negative: str, bg_mode: str = "auto") -> str:
+    if bg_mode == "story":
+        dest_line = f"- Nenne **{destination}** im ersten Satz von „Hintergrund & Tipps“.\n" if destination else ""
+        return f"""Bringe Einleitung und „Hintergrund & Tipps“ in eine **einheitliche Szene**:
+- Nutze einen **Übergangssatz** zur Einleitung oder eine klar markierte Rückblende.
+{dest_line}- Behalte Struktur & YAML-SEO-Block bei. Entferne Floskeln (vermeide: {negative}). Ich-Perspektive.
+- Konsistentes Vokabular: Camper, Kocher, Pfanne.
+
+Stilguide:
+{style}
+
+Struktur-Guide:
+{structure}
+
+Konsistenz-Guide:
+{consistency}
+
+Text:
+{base_text}
+"""
+    # tips-Modus: explizit Anekdoten vermeiden
+    return f"""Eröffne „Hintergrund & Tipps“ **ohne Anekdote**:
+- Starte direkt mit 2–4 **konkreten Praxis-Tipps** (häufige Fehler, Kniffe, Varianten).
+- **Vermeide** Formulierungen wie „Meine erste Begegnung …“, „Damals …“.
+- Behalte Struktur & YAML-SEO-Block. Entferne Floskeln (vermeide: {negative}). Ich-Perspektive.
 
 Stilguide:
 {style}
@@ -605,6 +636,24 @@ def guess_destination(text: str) -> str:
             return dest
     return ""
 
+def _wants_story(bg_mode: str, destination: str, topic: str, primary_kw: str) -> bool:
+    if bg_mode == "story":
+        return True
+    if bg_mode == "tips":
+        return False
+    # auto-Heuristik: bei sehr einfachen, generischen Gerichten keine Anekdote
+    txt = f"{topic} {primary_kw}".lower()
+    simple_markers = [
+        "spiegelei","rührei","porridge","haferbrei","nudeln","pasta",
+        "salat","sandwich","brot","reis","kartoffeln","omelett","pfannkuchen",
+        "tomatensoße","butterbrot"
+    ]
+    if any(w in txt for w in simple_markers):
+        return False
+    # ansonsten nur, wenn ein Reiseziel angegeben ist
+    return bool(destination.strip())
+
+
 def generate_article(
     topic: str,
     details: str,
@@ -615,6 +664,7 @@ def generate_article(
     max_words: int = 1000,
     destination: str = "",
     travel_angle: str = "Vanlife/Rundreise",
+    bg_mode: str = "auto",   # <— NEU
 ) -> Dict[str, Any]:
 
     system = SYSTEM_PROMPT_DE
@@ -631,16 +681,19 @@ def generate_article(
     # --- Reiseziel-Story-Hook ---
     dest = (destination or guess_destination(f"{topic} {pk}")).strip()
     angle = (travel_angle or "Vanlife/Rundreise").strip()
+    use_story = _wants_story(bg_mode, destination, topic, pk)
+
     travel_hook = ""
-    if dest:
+    if use_story:
         travel_hook = f"""
-Zusatzanforderung (Reiseziel-Story):
-- Beginne **H2 „Hintergrund & Tipps“** mit einer **klaren Anschluss-Formulierung** zur Einleitung (kein neuer Start).
-  Alternativ: sauber markierte **Rückblende** („Meine erste Begegnung …“, „Ein paar Tage zuvor …“).
-- Nenne **{dest}** im ersten Satz von „Hintergrund & Tipps“ und verknüpfe die Szene mit der Einleitung.
-- Beziehe dich auf **{angle}** (z. B. Campen/Roadtrip) und nenne **1–2 konkrete Orte/Routen/Details** (Geräusch, Geruch, Licht).
-- Erkläre kurz, **warum das Gericht dazu passt**. Danach folgen die Tipps.
+Zusatzanforderung (Reise-Story, nur wenn sinnvoll):
+- Beginne H2 „Hintergrund & Tipps“ mit **Übergang** zur Einleitung oder sauber markierter **Rückblende**.
+- Nenne **{destination}** im ersten Satz von „Hintergrund & Tipps“ und verknüpfe die Szene mit der Einleitung.
+- Beziehe dich auf **{angle}** und nenne 1–2 konkrete Orte/Details. Danach folgen die Tipps.
 """
+
+    coherence_line = COHERENCE_LINE_STORY if use_story else COHERENCE_LINE_TIPS
+
 
     # Pass 1: Draft
     draft = call_claude(
@@ -651,7 +704,7 @@ Zusatzanforderung (Reiseziel-Story):
                 topic=topic, details=details, primary_kw=pk, secondary_kws=sk,
                 styleguide=style, structure=structure, examples=examples,
                 consistency=consistency, plausibility=plausibility
-            ) + (travel_hook or "") + COHERENCE_LINE},
+            ) + (travel_hook or "") + coherence_line},
         ],
         num_predict=4096, temperature=0.8, top_p=0.9
     )
@@ -676,7 +729,7 @@ Zusatzanforderung (Reiseziel-Story):
                 min_words=min_words, max_words=max_words,
                 structure=structure, examples=examples,
                 consistency=consistency, plausibility=plausibility
-            ) + (travel_hook or "") + COHERENCE_LINE},
+            ) + (travel_hook or "") + coherence_line},
         ],
         temperature=0.6, top_p=0.9, num_predict=4096
     )
@@ -692,7 +745,7 @@ Zusatzanforderung (Reiseziel-Story):
         min_second_person=2,
         max_formal_address=0,
     )
-    ok, metrics = evaluate_quality(edited, targets, pk, destination=dest, details=details)
+    ok, metrics = evaluate_quality(edited, targets, pk, destination=dest, details=details, bg_mode=bg_mode)
 
     # Auto-Repair (bis zu 6 Versuche)
     attempts = 0
@@ -708,7 +761,7 @@ Zusatzanforderung (Reiseziel-Story):
         if sm["first_person"] < targets["min_first_person"] or not ich_intro_ok:
             repair_prompt = build_ich_rewrite_prompt(edited, negative, style)
         elif not coh.get("ok", True):
-            repair_prompt = build_coherence_fix_prompt(edited, dest, style, structure, consistency, negative)
+            repair_prompt = build_coherence_fix_prompt(edited, dest, style, structure, consistency, negative, bg_mode=bg_mode)
         elif not pl.get("ok", True):
             repair_prompt = build_plausibility_fix_prompt(edited, details, dest, style, structure, consistency, plausibility)
         elif sm["formal_address"] > 0 or sm["second_person"] < targets["min_second_person"]:
@@ -745,7 +798,7 @@ Text:
              {"role": "user", "content": repair_prompt}],
             temperature=0.5, top_p=0.9, num_predict=4096
         )
-        ok, metrics = evaluate_quality(edited, targets, pk, destination=dest, details=details)
+        ok, metrics = evaluate_quality(edited, targets, pk, destination=dest, details=details, bg_mode=bg_mode)
 
     # Harte Absicherung: Falls immer noch zu kurz → 2 Force-Expand-Runden
     if not ok and metrics["style_metrics"]["words"] < min_words:
@@ -758,7 +811,7 @@ Text:
                  )}],
                 temperature=0.5, top_p=0.9, num_predict=4096
             )
-            ok, metrics = evaluate_quality(edited, targets, pk, destination=dest, details=details)
+            ok, metrics = evaluate_quality(edited, targets, pk, destination=dest, details=details, bg_mode=bg_mode)
             if ok:
                 break
 
@@ -787,7 +840,14 @@ def seo_lengths(md: str) -> Dict[str, Any]:
         "meta_ok": 50 <= len(desc) <= 155
     }
 
-def evaluate_quality(text: str, targets: Dict[str, Any], primary_kw: str, destination: str = "", details: str = "") -> Tuple[bool, Dict[str, Any]]:
+def evaluate_quality(
+    text: str,
+    targets: Dict[str, Any],
+    primary_kw: str,
+    destination: str = "",
+    details: str = "",
+    bg_mode: str = "auto"
+) -> Tuple[bool, Dict[str, Any]]:
     style_metrics = {
         "ttr": type_token_ratio(text),
         "var_sentence_len": variance_sentence_length(text),
@@ -798,31 +858,41 @@ def evaluate_quality(text: str, targets: Dict[str, Any], primary_kw: str, destin
         "formal_address": count_formal_address(text),
         "has_banned": has_banned_phrases(text),
     }
+
     structure = check_structure(text, primary_kw)
     seo_meta = seo_lengths(text)
-    coherence = coherence_checks(text, destination)
+    coherence = coherence_checks(text, destination, bg_mode=bg_mode)
     plaus = plausibility_checks(text, details)
     ich_intro_ok = ich_in_first100(text)
 
     ok = (
-        not style_metrics["has_banned"] and
-        style_metrics["ttr"] >= targets.get("min_ttr", 0.45) and
-        style_metrics["var_sentence_len"] >= targets.get("min_var_sentence_len", 7.0) and
-        style_metrics["first_person"] >= targets.get("min_first_person", 6) and
-        style_metrics["numbers"] >= targets.get("min_numbers", 3) and
-        targets["min_words"] <= style_metrics["words"] <= targets["max_words"] and
-        style_metrics["second_person"] >= targets.get("min_second_person", 2) and
-        style_metrics["formal_address"] <= targets.get("max_formal_address", 0) and
-        ich_intro_ok and
-        all([
-            structure["yaml_frontmatter"], structure["h1_present"],
-            structure["h2_einleitung"], structure["h2_bg_tipps"], structure["h2_rezept"],
-            structure["h3_zutaten"], structure["h3_schritte"], structure["h3_zeiten"],
-            structure["steps_ok"], structure["kw_in_first100"],
-            seo_meta["title_ok"], seo_meta["meta_ok"]
-        ]) and
-        coherence["ok"] and
-        plaus["ok"]
+        not style_metrics["has_banned"]
+        and style_metrics["ttr"] >= targets.get("min_ttr", 0.45)
+        and style_metrics["var_sentence_len"] >= targets.get("min_var_sentence_len", 7.0)
+        and style_metrics["first_person"] >= targets.get("min_first_person", 6)
+        and style_metrics["numbers"] >= targets.get("min_numbers", 3)
+        and targets["min_words"] <= style_metrics["words"] <= targets["max_words"]
+        and style_metrics["second_person"] >= targets.get("min_second_person", 2)
+        and style_metrics["formal_address"] <= targets.get("max_formal_address", 0)
+        and ich_intro_ok
+        and all(
+            [
+                structure["yaml_frontmatter"],
+                structure["h1_present"],
+                structure["h2_einleitung"],
+                structure["h2_bg_tipps"],
+                structure["h2_rezept"],
+                structure["h3_zutaten"],
+                structure["h3_schritte"],
+                structure["h3_zeiten"],
+                structure["steps_ok"],
+                structure["kw_in_first100"],
+                seo_meta["title_ok"],
+                seo_meta["meta_ok"],
+            ]
+        )
+        and coherence["ok"]
+        and plaus["ok"]
     )
     return ok, {
         "style_metrics": style_metrics,
@@ -830,7 +900,7 @@ def evaluate_quality(text: str, targets: Dict[str, Any], primary_kw: str, destin
         "seo_meta": seo_meta,
         "coherence": coherence,
         "plausibility": plaus,
-        "ich_intro_ok": ich_intro_ok
+        "ich_intro_ok": ich_intro_ok,
     }
 
 # -------------------- WP/HTML Export --------------------
@@ -944,6 +1014,8 @@ def main():
         sys.exit(1)
 
     parser = argparse.ArgumentParser(description="Artikel-Generator mit fester Struktur + SEO + Ich/DU (Claude).")
+    parser.add_argument("--bg-mode", choices=["auto","tips","story"], default="auto",
+    help="Start von 'Hintergrund & Tipps': 'tips' ohne Anekdote, 'story' mit Brücke, 'auto' wählt passend")
     parser.add_argument("--topic", required=True, help="Thema / Titel-Idee")
     parser.add_argument("--details", required=True, help="Pflichtdetails (kommasepariert, z. B. 'Campingkocher, 12–14 Min, wenig Abwasch')")
     parser.add_argument("--primary_kw", default="", help="Primär-Keyword (SEO). Standard: topic")
@@ -963,7 +1035,8 @@ def main():
 
     try:
         result = generate_article(
-            args.topic, args.details,
+            args.topic, args.details, 
+            bg_mode=args.bg_mode,
             primary_kw=args.primary_kw, secondary_kws=args.secondary_kws,
             model=args.model, min_words=args.min_words, max_words=args.max_words,
             destination=args.destination, travel_angle=args.travel_angle

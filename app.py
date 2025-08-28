@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Streamlit-App: Camping-Rezept-Generator (Claude)
+- Erfordert: streamlit, python-dotenv (optional), markdown, pyyaml
+  pip install streamlit python-dotenv markdown pyyaml
+"""
 
 import os
 import re
@@ -18,12 +23,13 @@ except Exception:
 
 # Unsere Pipeline importieren
 try:
-    from humanizer_claude import generate_article
+    from humanizer_claude import generate_article  # muss bg_mode unterstützen
 except ImportError as e:
     st.error("Konnte `humanizer_claude` nicht importieren. "
              "Lege `app.py` in den gleichen Ordner wie `humanizer_claude.py`.")
     st.stop()
-# HTML/Frontmatter
+
+# HTML/Frontmatter-Helfer
 try:
     import markdown as _md
 except Exception:
@@ -67,7 +73,6 @@ def markdown_to_wp_html(md_body: str) -> str:
         raise RuntimeError("Paket 'markdown' fehlt. Installiere: pip install markdown")
     return _md.markdown(md_body, extensions=["extra", "sane_lists"])
 
-
 def extract_slug(md: str) -> str:
     m = re.search(r'^---[\s\S]*?\bslug:\s*"?(?P<slug>[^"\n]+)"?[\s\S]*?---', md, re.MULTILINE)
     if m and m.group("slug").strip():
@@ -93,6 +98,7 @@ def copy_to_clipboard_button(text: str, label: str = "In Zwischenablage kopieren
             height=0,
         )
         st.toast("Kopiert.", icon="✅")
+
 
 # ---------- App-Layout ----------
 
@@ -129,10 +135,10 @@ with st.sidebar:
 
     show_draft = st.toggle("Draft zusätzlich anzeigen", value=False)
     st.caption("Der Draft ist die unveredelte Rohfassung vor Clean/Style-Pass.")
+
     st.subheader("🧩 WordPress-Export")
     wp_keep_h1 = st.toggle("H1 im HTML belassen (sonst entfernt)", value=False)
     emit_meta_json = st.toggle("meta.json erzeugen", value=True)
-
 
 st.markdown("#### ✍️ Parameter")
 
@@ -158,6 +164,20 @@ with st.form("article_form"):
             index=0,
         )
 
+    # Steuerung für „Hintergrund & Tipps“
+    bg_mode_label = st.selectbox(
+        "Start von „Hintergrund & Tipps“",
+        ["Automatisch", "Tipps zuerst (keine Anekdote)", "Story/Brücke"],
+        index=0,
+        help="„Tipps zuerst“ vermeidet die immer gleiche Anekdoten-Öffnung."
+    )
+    bg_mode_map = {
+        "Automatisch": "auto",
+        "Tipps zuerst (keine Anekdote)": "tips",
+        "Story/Brücke": "story"
+    }
+    bg_mode = bg_mode_map[bg_mode_label]
+
     st.caption("Felder mit * sind Pflicht.")
     submitted = st.form_submit_button("🧪 Artikel generieren", type="primary")
 
@@ -180,13 +200,18 @@ if submitted:
                 max_words=int(max_words),
                 destination=destination,
                 travel_angle=travel_angle,
+                bg_mode=bg_mode,  # Steuerung für Hintergrundmodus
             )
         except Exception as e:
             st.error(f"Fehler beim Generieren: {e}")
             st.stop()
 
     final_md = result.get("final", "").strip()
-        # WP-HTML & Meta erzeugen
+    if not final_md:
+        st.error("Kein Text erhalten. Bitte Eingaben prüfen und erneut versuchen.")
+        st.stop()
+
+    # WP-HTML & Meta erzeugen
     try:
         meta, body_md = split_frontmatter(final_md)
         body_md_for_wp = remove_leading_h1(body_md) if not wp_keep_h1 else body_md
@@ -213,27 +238,25 @@ if submitted:
     metrics = result.get("metrics", {})
     ok = result.get("passed_heuristics", False)
 
-    if not final_md:
-        st.error("Kein Text erhalten. Bitte Eingaben prüfen und erneut versuchen.")
-        st.stop()
-
     # Anzeige
     slug = extract_slug(final_md)
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    file_name = f"{slug or 'artikel'}-{ts}.md"
 
     st.success(f"Fertig. Heuristiken/Checks ok: **{ok}**")
 
-    tabs = st.tabs(["📰 Gerenderte Ansicht", "🧾 Roh-Markdown", "📊 Metriken", "🧪 Draft" if show_draft else ""])
+    # Tabs
     tab_labels = ["📰 Gerenderte Ansicht", "🧾 Roh-Markdown", "🧩 WordPress-HTML", "📊 Metriken"]
     if show_draft:
         tab_labels.append("🧪 Draft")
     tabs = st.tabs(tab_labels)
 
-    # Tab 0: gerenderter Markdown
+    # Tab 0: gerenderter Markdown (YAML nicht anzeigen)
     with tabs[0]:
-        st.markdown(final_md)
-        dl_col1, dl_col2, dl_col3 = st.columns([1, 1, 2])
+        try:
+            st.markdown(body_md)  # nur Body, ohne Frontmatter
+        except Exception:
+            st.markdown(final_md)  # Fallback
+        dl_col1, dl_col2, _ = st.columns([1, 1, 2])
         with dl_col1:
             st.download_button(
                 "⬇️ Markdown herunterladen",
@@ -256,7 +279,7 @@ if submitted:
             st.divider()
             st.caption("Roh-HTML (zum Kopieren/Einfügen in Gutenberg „HTML“-Block oder Code-Editor):")
             st.text_area("HTML", value=wp_html, height=300)
-            col_html1, col_html2, col_html3 = st.columns([1,1,2])
+            col_html1, col_html2, col_html3 = st.columns([1, 1, 2])
             with col_html1:
                 st.download_button(
                     "⬇️ WordPress-HTML",
@@ -284,3 +307,6 @@ if submitted:
     if show_draft:
         with tabs[4]:
             st.text_area("Draft (Rohfassung)", value=draft_md, height=400)
+
+else:
+    st.caption("Hinweis: Zeitangaben in **Pflichtdetails** (z. B. „12–14 Min“) werden in der Plausibilitäts-Prüfung berücksichtigt.")

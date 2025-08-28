@@ -1,0 +1,42 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Humanizer (Claude): Interaktiv",
+        "type": "python",
+        "request": "launch",
+        "program": "${workspaceFolder}/humanizer_pipeline.py",
+        "console": "integratedTerminal",
+        "args": [
+          "--topic", "${input:topic}",
+          "--details", "${input:details}",
+          "--destination", "${input:destination}",
+          "--travel_angle", "${input:travel_angle}",
+          "--primary_kw", "${input:primary_kw}",
+          "--secondary_kws", "${input:secondary_kws}",
+          "--out", "${input:outFile}",
+          "--min-words", "${input:minWords}",
+          "--max-words", "${input:maxWords}",
+          "${input:showDraft}"
+        ],
+        "envFile": "${workspaceFolder}/.env"
+      }
+    ],
+    "inputs": [
+      { "id": "topic", "type": "promptString", "description": "Topic", "default": "Karpatka unterwegs im Van" },
+      { "id": "details", "type": "promptString", "description": "Details (kommasepariert)", "default": "Brandteig, Puddingcreme, Campingkocher, 12–14 Min kochen, wenig Abwasch" },
+      { "id": "primary_kw", "type": "promptString", "description": "Primary KW", "default": "Karpatka Rezept" },
+      { "id": "secondary_kws", "type": "promptString", "description": "Secondary KWs", "default": "Brandteig, Puddingcreme, Windbeutelkuchen" },
+      { "id": "outFile", "type": "promptString", "description": "Output-Datei", "default": "karpatka.md" },
+      { "id": "minWords", "type": "promptString", "description": "Min Words", "default": "700" },
+      { "id": "maxWords", "type": "promptString", "description": "Max Words", "default": "1000" },
+      {
+        "id": "showDraft",
+        "type": "pickString",
+        "description": "Draft zusätzlich speichern?",
+        "options": ["--show-draft", ""],
+        "default": "--show-draft"
+      }
+    ]
+  }
+  

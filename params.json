@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Humanizer (Claude)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/humanizer_claude.py",
+      "args": [
+        "--topic", "Shakshuka unterwegs",
+        "--details", "Levante Küche, Eier, Shakshuka, Camping, schnelles Gericht",
+        "--primary_kw", "Shakshuka Rezept",
+        "--secondary_kws", "Levante Küche, Eier, Shakshuka, Camping, schnelles Gericht",
+        "--out", "shakshuka.md",
+        "--min-words", "700",
+        "--max-words", "1000"
+      ],
+      "envFile": "${workspaceFolder}/.env"
+    }
+  ]
+}

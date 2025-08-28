@@ -56,22 +56,23 @@ Schreibe wie „camp-kochen.de“: pragmatisch, persönlich, ohne Füllfloskeln.
 
 STYLE_EXAMPLES_DE = """
 Beispiel 1:
-dieses polnische Karpatka Windbeutelkuchen-Rezept mit Puddingcreme-Füllung hat bisher alle meine Besucherherzen verzaubert. Kein Wunder, stellt euch mal vor, einen riesig großen Windbeutel zu vernaschen.
+Versprochen, so ein essbares Microadventure sorgt nochmal für eine Extraportion Umami.
 
 Beispiel 2 (Erklärung + Bildsprache):
-Wie seine kleinen Cousinen, die Windbeutel oder Eclairs, besteht dieser Kuchen aus zwei Elementen: Den Böden, nämlich aus Brandteig oder pâte à choux (wie die Franzosen zu sagen pflegen) und einer feinen Vanille-Buttercremefüllung. Für letztere kocht man zunächst einen Pudding und mischt diesen nach dem Abkühlen mit weicher Butter. Dann wird alles zusammengesetzt und zack, fühlt man sich wie in den Bergen. Im schneebedeckten Karpaten Hochgebirge beispielsweise, daher auch der Name. Im englischsprachigen Raum liest man auch häufig von Mountain Cakes in diesem Zusammenhang.
+Unsere cremige Süßkartoffelsuppe bringt extra viel Farbe ins trübe Herbstwetter und zusammen mit den schnellen, rauchigen und knusprigen Rosenkohl-Chips, die einen tollen Kontrast zur süßen Gemüsebasis bilden, wirds richtig aufregend in der Schüssel. 
 
 Beispiel 3 (Hürde entkrampfen, Humor):
-Ähnlich wie beim Hefeteig lese ich bei Lesern häufig, dass sie sich bis dato nicht recht an Brandteig heran trauen. Ich verstehe das ja. Brand klingt erst mal nach tatütata und die Tatsache, dass der Teig beispielsweise im Topf abgebrannt wird und dort einen weißen Belag hinterlassen soll klingt so gar nicht nach gesundem Backverstand. Kommen die Eier zum Teigkloß, kommen weitere Zweifel, denn zunächst streuben sich beide Parteien partout, zusammenzufinden und man gedenkt kurz, aufzugeben und sich lieber ne flotte Tomatenstulle zu machen. Aber nein, bitte bleibt am Ball, das wird. Wer einmal den Brandteig-Dreh heraus hat, wird dies demnächst im Schlaf backen können.
+Ich rede jetzt aber nicht davon, bei den nächsten drölf Schneeflocken sofort die 
+ganze Family in den Minivan zu packen und zusammen mit 827 anderen, denen die Decke auf den Kopf fällt, den nächstgelegenen und eigentlich viel zu popelig-kurzen Schlittenhügel mit einer fünfsekündigen Abfahrt und matschigem Auslauf anzusteuern. 
 
 Beispiel 4 (fachlich + bildlich):
-Man macht sich beim Backen mit Brandteig verschiedene physikalische Eigenschaften zu Nutze, um ein luftiges Gebäck zu erhalten, ohne jedoch Backtriebmittel wie Backpulver, Natron oder Hefe verwenden zu müssen. Beim Backen kann dann die gebundene Feuchtigkeit nicht als Wasserdampf durch die Kruste aus verkleisterter Stärke (durch das Abbrennen) entweichen, es entstehen Hohlräume, die das Gebäck schön aufplustern. So kommt der Kuchen auch zu seinem Gebirge, bevor ein Schneesturm aus Puderzucker darüber herfällt.
-"""
+Dafür schneiden wir den Strunk großzügig ab und kerben den Stil rundherum leicht schräg mit einem kleinen Küchenmesser ein. Am einfachsten gehts mit einem kurzen, scharfen Schälmesser. So lassen sich die äußeren Blätter leicht ablösen."""
 
 NEGATIVE_LIST_DE = [
     "In diesem Artikel", "abschließend", "insgesamt", "innovativ", "köstlich",
     "einfach zuzubereiten", "im Folgenden", "es ist wichtig zu beachten",
-    "nachstehend", "zusammenfassend", "Fazit"
+    "nachstehend", "zusammenfassend", "Fazit", "Revolutioniere", "Tauche ein", "Erfahre mehr über", 
+    "Auf eine Reise gehen durch", "spannende Einblicke", "Die Macht von", "Entfessele die Kraft"
 ]
 
 SYSTEM_PROMPT_DE = """Du bist Redakteur:in für camp-kochen.de.
@@ -85,7 +86,7 @@ Kohärenz & Story-Führung:
 - Halte Einleitung und „Hintergrund & Tipps“ in derselben Szene/Erzählzeit, ODER markiere Wechsel sauber als Rückblende (z. B. „Meine erste Begegnung …“, „Ein paar Tage zuvor …“).
 - Wenn ein Reiseziel angegeben ist, nenne es in der Einleitung **und** zu Beginn von „Hintergrund & Tipps“.
 - Vermeide konkurrierende Start-Szenen; nutze im Hintergrund einen Übergangssatz, der klar an die Einleitung anknüpft.
-- Nutze ein konsistentes Vokabular: „Camper“, „Kocher“, „Pfanne“, „Vanlife/Rundreise“.
+- Nutze ein konsistentes Vokabular: „Camper“, „Kocher“, „Pfanne“, „Vanlife“, "Rundreise"
 """
 
 PLAUSIBILITY_GUIDE_DE = """
@@ -94,6 +95,7 @@ Plausibilität & Camping-Kontext:
 - „Wenig Abwasch“: vermeide unnötige zusätzliche Schüsseln/Schalen. Wenn möglich direkt in der Pfanne arbeiten.
 - Bleib bei hausüblichen Mengen und Zeiten. Wenn im Input ein Zeitfenster genannt ist (z. B. 12–14 Min), nutze es.
 - Keine erfundenen Markennamen oder exakten Adressen. Nenne nur allgemein bekannte Orte/Landschaften (z. B. Tel Aviv, Negev, Totes Meer).
+- sei präzise bei der Beschreibung von Details, bildlich beschreiben, vermeide Übertreibungen
 """
 
 # -------------------- Struktur-Guide (verbindlich) --------------------

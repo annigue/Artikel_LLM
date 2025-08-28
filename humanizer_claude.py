@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-humanizer_pipeline.py (Claude-Version)
+humanizer_claude.py (Claude-Version)
 --------------------------------------
 Zwei-Pass-Schreibpipeline mit:
 - fester Artikelstruktur + SEO-Block (YAML Frontmatter)
@@ -15,14 +15,14 @@ Erfordert:
   ANTHROPIC_API_KEY als Umgebungsvariable
 
 Beispiel:
-python humanizer_pipeline.py \
-  --topic "Karpatka unterwegs im Van" \
-  --details "Brandteig, Puddingcreme, Campingkocher, 12–14 Min kochen, wenig Abwasch" \
-  --primary_kw "Karpatka Rezept" \
-  --secondary_kws "Brandteig, Puddingcreme, Windbeutelkuchen" \
+python humanizer_claude.py \
+  --topic "Shakshuka" \
+  --details "Eier, Tomate, Levante Küche, wenig Abwasch" \
+  --primary_kw "Schakshuka Rezept" \
+  --secondary_kws "Eier, Tomate, Levante Küche" \
   --destination "Polen" \
   --travel_angle "Rundreise im Camper" \
-  --out karpatka.md --min-words 700 --max-words 1000
+  --out shakshuka.md --min-words 700 --max-words 1000
 """
 
 import argparse
@@ -831,6 +831,109 @@ def evaluate_quality(text: str, targets: Dict[str, Any], primary_kw: str, destin
         "ich_intro_ok": ich_intro_ok
     }
 
+# -------------------- WP/HTML Export --------------------
+
+try:
+    import markdown as _md
+except ImportError:
+    _md = None
+
+try:
+    import yaml as _yaml
+except ImportError:
+    _yaml = None
+
+FRONTMATTER_RE = re.compile(r"^---\s*\n([\s\S]*?)\n---\s*", re.MULTILINE)
+
+def split_frontmatter(md_text: str) -> Tuple[Dict[str, Any], str]:
+    """
+    Trennt YAML-Frontmatter vom Markdown-Body.
+    Gibt (meta, body_md) zurück. Wenn kein Frontmatter vorhanden: ({}, originaler Text).
+    """
+    m = FRONTMATTER_RE.match(md_text.strip())
+    if not m:
+        return {}, md_text
+    raw_yaml = m.group(1)
+    body_md = md_text[m.end():]
+    meta: Dict[str, Any] = {}
+    if _yaml:
+        try:
+            meta = _yaml.safe_load(raw_yaml) or {}
+        except Exception:
+            meta = {}
+    return meta, body_md
+
+def remove_leading_h1(md_body: str) -> str:
+    """
+    Entfernt die allererste H1-Zeile (# ...) am Dokumentanfang (falls vorhanden).
+    """
+    lines = md_body.lstrip().splitlines()
+    if lines and re.match(r"^\s*#\s+.+", lines[0]):
+        return "\n".join(lines[1:]).lstrip()
+    return md_body
+
+def markdown_to_wp_html(md_body: str) -> str:
+    """
+    Wandelt den Markdown-Body (ohne Frontmatter) in HTML um – kompatibel mit WP (Gutenberg & Classic).
+    """
+    if not _md:
+        raise RuntimeError("Das Paket 'markdown' fehlt. Bitte installieren: pip install markdown")
+    # 'extra' bündelt u. a. Abkürzungen, Listen, Tabellen; 'sane_lists' verbessert Listenkonvertierung
+    return _md.markdown(md_body, extensions=["extra", "sane_lists"])
+
+def write_wp_outputs(
+    final_markdown: str,
+    out_md_path: str,
+    strip_h1: bool = True,
+    emit_meta_json: bool = True,
+    html_out_path: Optional[str] = None,
+    meta_json_path: Optional[str] = None,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """
+    Schreibt neben der .md eine .html (WP-Content) und optional meta.json (SEO/Slug).
+    - strip_h1=True: entfernt die erste H1 aus dem HTML-Content (Titel kommt in WP ins Titel-Feld).
+    """
+    # 1) Frontmatter abtrennen
+    meta, body_md = split_frontmatter(final_markdown)
+
+    # 2) Optional H1 im Body entfernen (WP setzt Titel separat)
+    body_md_for_wp = remove_leading_h1(body_md) if strip_h1 else body_md
+
+    # 3) HTML rendern
+    wp_html = markdown_to_wp_html(body_md_for_wp)
+
+    # 4) Pfade festlegen
+    base_no_ext = re.sub(r"\.md$", "", out_md_path)
+    html_out_path = html_out_path or (base_no_ext + ".html")
+    meta_json_path = meta_json_path or (base_no_ext + ".meta.json")
+
+    # 5) HTML schreiben
+    with open(html_out_path, "w", encoding="utf-8") as f:
+        f.write(wp_html.strip() + "\n")
+
+    # 6) Meta schreiben (optional)
+    if emit_meta_json:
+        # Fallbacks, falls Frontmatter fehlt
+        h1 = ""
+        m_h1 = re.search(r"^#\s+(.+)", body_md, re.MULTILINE)
+        if m_h1:
+            h1 = m_h1.group(1).strip()
+
+        meta_out = {
+            "seo_title": meta.get("seo_title", h1 or ""),
+            "meta_description": meta.get("meta_description", ""),
+            "slug": meta.get("slug", ""),
+            "primary_keyword": meta.get("primary_keyword", ""),
+            "secondary_keywords": meta.get("secondary_keywords", []),
+            # Praktisch: Titel fürs WP Titel-Feld
+            "post_title": h1 or meta.get("seo_title", ""),
+        }
+        with open(meta_json_path, "w", encoding="utf-8") as f:
+            json.dump(meta_out, f, ensure_ascii=False, indent=2)
+
+    return html_out_path, meta_json_path if emit_meta_json else None, wp_html
+
+
 # -------------------- CLI --------------------
 
 def main():
@@ -850,6 +953,10 @@ def main():
     parser.add_argument("--travel_angle", default="Vanlife/Rundreise", help="Reiseperspektive (z. B. Campen, Roadtrip, Städtetrip)")
     parser.add_argument("--out", default="out.md", help="Zieldatei (Markdown)")
     parser.add_argument("--show-draft", action="store_true", help="Draft zusätzlich speichern")
+    parser.add_argument("--html-out", default="", help="Pfad für die generierte WordPress-HTML-Datei (Standard: <out>.html)")
+    parser.add_argument("--wp-keep-h1", action="store_true", help="H1 im HTML belassen (Standard: H1 wird für WP entfernt)")
+    parser.add_argument("--no-meta-json", action="store_true", help="Kein meta.json schreiben")
+
     args = parser.parse_args()
 
     try:
@@ -869,17 +976,20 @@ def main():
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(result["final"].strip() + "\n")
 
-    if args.show_draft:
-        draft_path = re.sub(r"\.md$", "_draft.md", args.out)
-        with open(draft_path, "w", encoding="utf-8") as f:
-            f.write(result["draft"].strip() + "\n")
-
-    print("# --- Humanizer Pipeline (Struktur + SEO / Claude) ---")
-    print("Heuristiken/Struktur/SEO OK:", result["passed_heuristics"])
-    print("Metriken:", json.dumps(result["metrics"], ensure_ascii=False, indent=2))
-    print("Kohärenz:", json.dumps(result["metrics"].get("coherence", {}), ensure_ascii=False))
-    print("Plausibilität:", json.dumps(result["metrics"].get("plausibility", {}), ensure_ascii=False))
-    print(f"Finaler Text gespeichert in: {args.out}")
+        # HTML/WordPress-Export
+    try:
+        html_path, meta_path, _html_preview = write_wp_outputs(
+            final_markdown=result["final"].strip(),
+            out_md_path=args.out,
+            strip_h1=(not args.wp_keep_h1),
+            emit_meta_json=(not args.no_meta_json),
+            html_out_path=(args.html_out if args.html_out else None),
+        )
+        print(f"WordPress-HTML gespeichert in: {html_path}")
+        if meta_path:
+            print(f"WP-Metadaten (Frontmatter) gespeichert in: {meta_path}")
+    except Exception as e:
+        print("Fehler beim HTML/WP-Export:", e)
 
 if __name__ == "__main__":
     main()

@@ -23,8 +23,50 @@ except ImportError as e:
     st.error("Konnte `humanizer_claude` nicht importieren. "
              "Lege `app.py` in den gleichen Ordner wie `humanizer_claude.py`.")
     st.stop()
+# HTML/Frontmatter
+try:
+    import markdown as _md
+except Exception:
+    _md = None
+
+try:
+    import yaml as _yaml
+except Exception:
+    _yaml = None
+
 
 # ---------- Utils ----------
+
+FRONTMATTER_RE = re.compile(r"^---\s*\n([\s\S]*?)\n---\s*", re.MULTILINE)
+
+def split_frontmatter(md_text: str):
+    """Gibt (meta_dict, body_md) zurück."""
+    m = FRONTMATTER_RE.match(md_text.strip())
+    if not m:
+        return {}, md_text
+    raw_yaml = m.group(1)
+    body_md = md_text[m.end():]
+    meta = {}
+    if _yaml:
+        try:
+            meta = _yaml.safe_load(raw_yaml) or {}
+        except Exception:
+            meta = {}
+    return meta, body_md
+
+def remove_leading_h1(md_body: str) -> str:
+    """Erste H1 (# ...) entfernen (WP setzt Titel separat)."""
+    lines = md_body.lstrip().splitlines()
+    if lines and re.match(r"^\s*#\s+.+", lines[0]):
+        return "\n".join(lines[1:]).lstrip()
+    return md_body
+
+def markdown_to_wp_html(md_body: str) -> str:
+    """Markdown → HTML (für Gutenberg/Klassik-Editor geeignet)."""
+    if not _md:
+        raise RuntimeError("Paket 'markdown' fehlt. Installiere: pip install markdown")
+    return _md.markdown(md_body, extensions=["extra", "sane_lists"])
+
 
 def extract_slug(md: str) -> str:
     m = re.search(r'^---[\s\S]*?\bslug:\s*"?(?P<slug>[^"\n]+)"?[\s\S]*?---', md, re.MULTILINE)
@@ -87,6 +129,10 @@ with st.sidebar:
 
     show_draft = st.toggle("Draft zusätzlich anzeigen", value=False)
     st.caption("Der Draft ist die unveredelte Rohfassung vor Clean/Style-Pass.")
+    st.subheader("🧩 WordPress-Export")
+    wp_keep_h1 = st.toggle("H1 im HTML belassen (sonst entfernt)", value=False)
+    emit_meta_json = st.toggle("meta.json erzeugen", value=True)
+
 
 st.markdown("#### ✍️ Parameter")
 
@@ -140,6 +186,29 @@ if submitted:
             st.stop()
 
     final_md = result.get("final", "").strip()
+        # WP-HTML & Meta erzeugen
+    try:
+        meta, body_md = split_frontmatter(final_md)
+        body_md_for_wp = remove_leading_h1(body_md) if not wp_keep_h1 else body_md
+        wp_html = markdown_to_wp_html(body_md_for_wp)
+
+        # Fallback-Titel aus H1, falls im YAML nichts steht
+        m_h1 = re.search(r'^#\s+(.+)$', body_md, re.MULTILINE)
+        h1_title = (m_h1.group(1).strip() if m_h1 else "")
+
+        meta_out = {
+            "seo_title": meta.get("seo_title", h1_title),
+            "meta_description": meta.get("meta_description", ""),
+            "slug": meta.get("slug", extract_slug(final_md)),
+            "primary_keyword": meta.get("primary_keyword", ""),
+            "secondary_keywords": meta.get("secondary_keywords", []),
+            "post_title": h1_title or meta.get("seo_title", ""),
+        }
+        meta_json_str = json.dumps(meta_out, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"Fehler beim WP-Export: {e}")
+        wp_html, meta_json_str = "", ""
+
     draft_md = result.get("draft", "").strip()
     metrics = result.get("metrics", {})
     ok = result.get("passed_heuristics", False)
@@ -156,30 +225,62 @@ if submitted:
     st.success(f"Fertig. Heuristiken/Checks ok: **{ok}**")
 
     tabs = st.tabs(["📰 Gerenderte Ansicht", "🧾 Roh-Markdown", "📊 Metriken", "🧪 Draft" if show_draft else ""])
-    # Entferne leere Tabs (Streamlit benötigt fixe Länge)
-    tabs = [t for t in tabs if t]
+    tab_labels = ["📰 Gerenderte Ansicht", "🧾 Roh-Markdown", "🧩 WordPress-HTML", "📊 Metriken"]
+    if show_draft:
+        tab_labels.append("🧪 Draft")
+    tabs = st.tabs(tab_labels)
 
+    # Tab 0: gerenderter Markdown
     with tabs[0]:
         st.markdown(final_md)
-
         dl_col1, dl_col2, dl_col3 = st.columns([1, 1, 2])
         with dl_col1:
-            st.download_button("⬇️ Markdown herunterladen", data=final_md.encode("utf-8"),
-                               file_name=file_name, mime="text/markdown")
+            st.download_button(
+                "⬇️ Markdown herunterladen",
+                data=final_md.encode("utf-8"),
+                file_name=f"{slug}-{ts}.md",
+                mime="text/markdown"
+            )
         with dl_col2:
-            copy_to_clipboard_button(final_md, "📋 Kopieren")
+            copy_to_clipboard_button(final_md, "📋 Markdown kopieren")
 
+    # Tab 1: Roh-Markdown
     with tabs[1]:
         st.text_area("Markdown", value=final_md, height=500)
 
-    if len(tabs) >= 3:
-        with tabs[2]:
-            st.json(metrics, expanded=False)
+    # Tab 2: WordPress-HTML
+    with tabs[2]:
+        if wp_html:
+            st.caption("Vorschau (HTML gerendert):")
+            components.html(wp_html, height=600, scrolling=True)
+            st.divider()
+            st.caption("Roh-HTML (zum Kopieren/Einfügen in Gutenberg „HTML“-Block oder Code-Editor):")
+            st.text_area("HTML", value=wp_html, height=300)
+            col_html1, col_html2, col_html3 = st.columns([1,1,2])
+            with col_html1:
+                st.download_button(
+                    "⬇️ WordPress-HTML",
+                    data=wp_html.encode("utf-8"),
+                    file_name=f"{slug}-{ts}.html",
+                    mime="text/html"
+                )
+            with col_html2:
+                copy_to_clipboard_button(wp_html, "📋 HTML kopieren")
+            if emit_meta_json and meta_json_str:
+                st.download_button(
+                    "⬇️ meta.json",
+                    data=meta_json_str.encode("utf-8"),
+                    file_name=f"{slug}-{ts}.meta.json",
+                    mime="application/json"
+                )
+        else:
+            st.warning("Kein HTML generiert.")
 
-    if show_draft and len(tabs) >= 4:
-        with tabs[3]:
+    # Tab 3: Metriken
+    with tabs[3]:
+        st.json(metrics, expanded=False)
+
+    # Tab 4: Draft (optional)
+    if show_draft:
+        with tabs[4]:
             st.text_area("Draft (Rohfassung)", value=draft_md, height=400)
-
-    st.info("Tipp: Nutze die Download-Schaltfläche für die saubere Weitergabe oder den Kopieren-Button für die Zwischenablage.")
-else:
-    st.caption("Hinweis: Zeitangaben in **Pflichtdetails** (z. B. „12–14 Min“) werden in der Plausibilitäts-Prüfung berücksichtigt.")

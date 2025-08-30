@@ -1,0 +1,7 @@
+streamlit
+anthropic
+openai
+python-dotenv
+pandas
+numpy
+requests

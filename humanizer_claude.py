@@ -73,7 +73,7 @@ NEGATIVE_LIST_DE = [
     "einfach zuzubereiten", "im Folgenden", "es ist wichtig zu beachten",
     "nachstehend", "zusammenfassend", "Fazit", "Revolutioniere", "Tauche ein", "Erfahre mehr über", 
     "Auf eine Reise gehen durch", "spannende Einblicke", "Die Macht von", "Entfessele die Kraft",
-    "Meine erste Begegnung"
+    "Meine erste Begegnung", "Nicht nur", "Hier sind einige", "Im Laufe der Jahre", "Ich habe festgelstellt"
 ]
 
 SYSTEM_PROMPT_DE = """Du bist Redakteur:in für camp-kochen.de.

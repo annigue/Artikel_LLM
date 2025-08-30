@@ -1,5 +1,42 @@
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.log
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Secrets / Config
 .env
-.env
-*.env*
+.env.*
+*.env
+*.env.*
+.streamlit/secrets.toml
+
+# Schlüssel & Zertifikate
 *.key
 *.pem
+*.p12
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Cache/Build
+dist/
+build/
+.pytest_cache/
+.ipynb_checkpoints/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Projekt-Outputs
+out.md
+EOF

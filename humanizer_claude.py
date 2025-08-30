@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-humanizer_pipeline.py (Claude-Version) — strukturstrenger & doppelfrei
-----------------------------------------------------------------------
-- Feste Artikelstruktur + SEO-Block (YAML Frontmatter)
-- Ich-Erzählstimme + Du-Hinweise
-- Grammatik/Style-Clean-Pass
-- Wortlängenrange (min/max) + Heuristiken
-- Auto-Repair (bis 6 Versuche) inkl. Struktur-Verschlankung
-- Reiseziel-Mini-Story am H2-Start „Hintergrund & Tipps“
-- Nach JEDEM Modellschritt Normalisierung (Überschriften/Listen/Dedupe)
+humanizer_pipeline.py (Claude-Version)
+--------------------------------------
+Zwei-Pass-Schreibpipeline mit:
+- fester Artikelstruktur + SEO-Block (YAML Frontmatter)
+- Clean-Pass (Rechtschreibung/Grammatik, Ich-Perspektive, du im Rezeptteil)
+- Wortlängen-Range (min/max) + Heuristiken
+- Auto-Repair (Ich/du/Struktur/SEO/Story/Expand/Kürzen), bis zu 6 Versuche
+- Reise-Mini-Story ODER Herkunftsnote am Anfang von „Hintergrund & Tipps“
+- Kohärenz-Check (Einleitung ↔ Hintergrund andocken) + Sensorik-Heuristik
 
 Erfordert:
   pip install anthropic
-  ANTHROPIC_API_KEY in der Umgebung
+  ANTHROPIC_API_KEY als Umgebungsvariable
 
 Beispiel:
 python humanizer_pipeline.py \
-  --topic "Protein-Porridge mit Erdnuss-Banane" \
-  --details "Haferflocken, Erdnussbutter, Banane, Campingkocher, 10–12 Min köcheln" \
-  --primary_kw "Protein-Porridge" \
-  --secondary_kws "Erdnussbutter, Banane, Campingfrühstück" \
-  --destination "Norwegen" \
-  --travel_angle "Vanlife" \
-  --out porridge.md --min-words 700 --max-words 1000
+  --topic "Shakshuka" \
+  --details "Tomaten, Paprika, Eier, Campingkocher" \
+  --primary_kw "Shakshuka Rezept" \
+  --secondary_kws "Israel, Levante, Camping" \
+  --destination "Israel" \
+  --travel_angle "Roadtrip / Vanlife" \
+  --story_mode auto --story_len medium --story_places "Carmel-Markt,Jaffa,Route 90" \
+  --out shakshuka.md --min-words 700 --max-words 1000
 """
 
 import argparse
@@ -34,109 +35,99 @@ import statistics
 import sys
 from typing import List, Dict, Any, Tuple
 
-# ---------------- Anthropic (Claude) ----------------
-
+# --- Anthropic (Claude) ---
 try:
     import anthropic
 except ImportError:
     print("Das 'anthropic'-Paket fehlt. Bitte installieren: pip install anthropic")
     sys.exit(1)
 
-# Optionaler Key-Check (wenn du willst aktivieren):
-# if not os.getenv("ANTHROPIC_API_KEY"):
-#     print("Fehlt: ANTHROPIC_API_KEY")
-#     sys.exit(1)
+# Optionaler ENV-Check (nicht hart abbrechen, nur Hinweis)
+if not os.getenv("ANTHROPIC_API_KEY"):
+    print("Hinweis: 'ANTHROPIC_API_KEY' ist nicht gesetzt. Setze ihn als Umgebungsvariable, sonst schlägt der API-Call fehl.")
 
-# ---------------- Schalter & Limits ----------------
-
-MAX_TIPS = 4
-MAX_VARIANTS = 4
-MIN_STEPS = 6
-MAX_STEPS = 8
-MAX_BULLETS_PER_LIST = 4
-ALLOWED_H2 = {"Einleitung", "Hintergrund & Tipps"}
-ALLOWED_H3_IN_REZEPT = {"Zutaten", "Schritt für Schritt", "Zeiten & Portionen"}
-
-FORBIDDEN_H2 = {
-    "Packliste", "Timing", "Timing & Planung", "Troubleshooting",
-    "Schnelle Abwandlungen", "Planung", "Packliste für die Zubereitung unterwegs"
-}
-
-# ---------------- Stil & Guides ----------------
+# -------------------- Stil + Beispiele --------------------
 
 STYLEGUIDE_DE = """
 Schreibe wie „camp-kochen.de“: pragmatisch, persönlich, ohne Füllfloskeln.
-- **Ich-Perspektive** (ich/mir/mich/mein) in allen Abschnitten.
-- Leseransprache „du“ ist erlaubt für Tipps/Handgriffe; Erzähler bleibt „ich“.
-- Variiere Satzlängen. Kurze Sätze sind okay.
+- Erzählerstimme: **Ich-Perspektive** (ich/mir/mich/mein) in allen Abschnitten außer dem Rezeptteil.
+- Leseransprache „du“ ist erlaubt für Hinweise/Handgriffe; im Abschnitt **„Schritt für Schritt“: direkte du-/Imperativ-Form**.
+- Variiere Satzlängen. Kurze Sätze sind erlaubt.
 - Konkrete Details (Mengen, Zeiten, Geräusche/Textur), keine Leerphrasen.
 - Vermeide: „In diesem Artikel“, „abschließend“, „insgesamt“, „innovativ“, „köstlich“,
   „einfach zuzubereiten“, „im Folgenden“, „es ist wichtig zu beachten“, „nachstehend“.
 - Aktive Verben. Keine sterile Aufzählung.
-- Länge: zwischen {min_words} und {max_words} Wörtern. Keine Wortzahl nennen.
+- Länge: zwischen {min_words} und {max_words} Wörtern. Gib keine Wortzahl aus.
 """
 
 STYLE_EXAMPLES_DE = """
-Beispiel (Ton + Bild):
-Wie seine kleinen Cousinen, die Windbeutel, besteht dieser Kuchen aus Brandteig und einer Vanillecreme. Erst kocht man einen Pudding, dann mischt man weiche Butter darunter. Zack, fühlt man sich wie im Hochgebirge. Puderzucker wie Schneesturm.
+Beispiel 1:
+dieses polnische Karpatka Windbeutelkuchen-Rezept mit Puddingcreme-Füllung hat bisher alle meine Besucherherzen verzaubert. Kein Wunder, stellt euch mal vor, einen riesig großen Windbeutel zu vernaschen.
+
+Beispiel 2 (Erklärung + Bildsprache):
+Wie seine kleinen Cousinen, die Windbeutel oder Eclairs, besteht dieser Kuchen aus zwei Elementen: Den Böden, nämlich aus Brandteig oder pâte à choux (wie die Franzosen zu sagen pflegen) und einer feinen Vanille-Buttercremefüllung. Für letztere kocht man zunächst einen Pudding und mischt diesen nach dem Abkühlen mit weicher Butter. Dann wird alles zusammengesetzt und zack, fühlt man sich wie in den Bergen. Im schneebedeckten Karpaten Hochgebirge beispielsweise, daher auch der Name. Im englischsprachigen Raum liest man auch häufig von Mountain Cakes in diesem Zusammenhang.
+
+Beispiel 3 (Hürde entkrampfen, Humor):
+Ähnlich wie beim Hefeteig lese ich bei Lesern häufig, dass sie sich bis dato nicht recht an Brandteig heran trauen. Ich verstehe das ja. Brand klingt erst mal nach tatütata und die Tatsache, dass der Teig beispielsweise im Topf abgebrannt wird und dort einen weißen Belag hinterlassen soll klingt so gar nicht nach gesundem Backverstand. Kommen die Eier zum Teigkloß, kommen weitere Zweifel, denn zunächst streuben sich beide Parteien partout, zusammenzufinden und man gedenkt kurz, aufzugeben und sich lieber ne flotte Tomatenstulle zu machen. Aber nein, bitte bleibt am Ball, das wird. Wer einmal den Brandteig-Dreh heraus hat, wird dies demnächst im Schlaf backen können.
+
+Beispiel 4 (fachlich + bildlich):
+Man macht sich beim Backen mit Brandteig verschiedene physikalische Eigenschaften zu Nutze, um ein luftiges Gebäck zu erhalten, ohne jedoch Backtriebmittel wie Backpulver, Natron oder Hefe verwenden zu müssen. Beim Backen kann dann die gebundene Feuchtigkeit nicht als Wasserdampf durch die Kruste aus verkleisterter Stärke (durch das Abbrennen) entweichen, es entstehen Hohlräume, die das Gebäck schön aufplustern. So kommt der Kuchen auch zu seinem Gebirge, bevor ein Schneesturm aus Puderzucker darüber herfällt.
 """
 
 NEGATIVE_LIST_DE = [
     "In diesem Artikel", "abschließend", "insgesamt", "innovativ", "köstlich",
     "einfach zuzubereiten", "im Folgenden", "es ist wichtig zu beachten",
-    "nachstehend", "zusammenfassend", "Fazit"
+    "nachstehend", "zusammenfassend", "Fazit", "Revolutioniere", "Tauche ein", "Erfahre mehr über", 
+    "Auf eine Reise gehen durch", "spannende Einblicke", "Die Macht von", "Entfessele die Kraft",
+    "Meine erste Begegnung", "Nicht nur", "Hier sind einige", "Im Laufe der Jahre", "Ich habe festgelstellt"
 ]
 
 SYSTEM_PROMPT_DE = """Du bist Redakteur:in für camp-kochen.de.
-Schreibe persönlich, konkret, in Ich-Perspektive mit Du-Hinweisen, ohne Floskeln.
-Halte den Struktur-Guide strikt ein.
+Deine Aufgabe: hilfreiche, konkrete, persönliche Texte mit natürlichem Rhythmus verfassen.
+Erzählerstimme ist **Ich-Perspektive**; Leseransprache „du“ nur für Hinweise/Tipps.
+Im Abschnitt **„Schritt für Schritt“** konsequent **du-/Imperativ-Form**.
+Halte den Stilguide strikt ein.
 """
 
 KONSISTENZ_GUIDE_DE = """
 Kohärenz & Story-Führung:
-- „Einleitung“ und „Hintergrund & Tipps“ bilden eine Erzählung; im Hintergrund zuerst an die Einleitung andocken.
-- Reiseziel (falls vorhanden) in Einleitung **und** im ersten Satz des Hintergrunds nennen.
-- Keine konkurrierenden Start-Szenen; wenn Wechsel: sauber als Rückblende markieren („Meine erste Begegnung…“).
-- Konsistentes Vokabular: Camper, Kocher, Pfanne, Vanlife/Rundreise.
+- Halte Einleitung und „Hintergrund & Tipps“ in derselben Szene/Erzählzeit, ODER markiere Wechsel sauber als Rückblende (z. B. „Meine erste Begegnung …“, „Ein paar Tage zuvor …“).
+- Wenn ein Reiseziel angegeben ist, nenne es in der Einleitung **und** zu Beginn von „Hintergrund & Tipps“.
+- Vermeide konkurrierende Start-Szenen; nutze im Hintergrund einen Übergangssatz, der klar an die Einleitung anknüpft.
+- Nutze ein konsistentes Vokabular: „Camper“, „Kocher“, „Pfanne“, „Vanlife/Rundreise“.
 """
 
-STRUCTURE_GUIDE = """
-Erzeuge einen Artikel in **Markdown** mit **genau** dieser Struktur:
+# -------------------- Struktur-Guide (verbindlich) --------------------
 
-- YAML-Frontmatter (oberhalb des Inhalts):
+STRUCTURE_GUIDE = """
+Erzeuge einen vollständigen Artikel in **Markdown** mit exakt dieser Struktur:
+
+- **SEO-Block** (oberhalb des Inhalts), im YAML-Frontmatter-Format:
   ---
-  seo_title: "<max 60 Zeichen, enthält Primär-Keyword>"
-  meta_description: "<max 155 Zeichen, Nutzen/USP, enthält Primär-Keyword>"
+  seo_title: "<max 60 Zeichen, Primär-Keyword enthalten>"
+  meta_description: "<max 155 Zeichen, Nutzen/USP, Primär-Keyword enthalten>"
   slug: "<kebab-case-ohne-Sonderzeichen>"
   primary_keyword: "<Primär-Keyword>"
   secondary_keywords: ["<Sek1>", "<Sek2>", "<Sek3>"]
   ---
-- # H1: Rezeptname (Primär-Keyword enthalten)
-- ## Einleitung
-  - 1–2 Absätze, Primär-Keyword in den ersten 100 Wörtern.
-- ## Hintergrund & Tipps
-  - Anschluss an die Einleitung (oder klare Rückblende).
-  - 2–4 **Bullet-Tipps** (keine Doppelungen), kompakt formuliert.
-- ## Rezept: <Kurzbezeichnung>
-  - ### Zutaten (Liste mit Mengenangaben)
-  - ### Schritt für Schritt (nummerierte Liste, 6–8 Schritte)
-  - ### Zeiten & Portionen (Zubereitung, Gesamtzeit, Portionen)
-
-Optional:
-- **Genau ein** H2 „Varianten“ (max. 4 kompakte Bullets).
-
-**Keine weiteren H2/H3** außer den oben genannten.
-**Keine Packliste, Timing, Troubleshooting oder ähnliche Zusatzabschnitte.**
+- **H1**: Rezeptname (Primär-Keyword enthalten)
+- **H2 Einleitung**: 1–2 Absätze, natürliche Einbindung des Primär-Keywords in den ersten 100 Wörtern.
+- **H2 Hintergrund & Tipps**: (Szene oder Herkunftsnote + 2–4 Sätze praktische Tipps als Fließtext, **keine Liste**).
+- **H2 Rezept: <Kurzbezeichnung>**
+  - **H3 Zutaten** (Liste mit Mengenangaben)
+  - **H3 Schritt für Schritt** (nummerierte Liste, 6–10 Schritte, du-/Imperativ-Form)
+  - **H3 Zeiten & Portionen** (Zubereitung, Gesamtzeit, Ruhe-/Backzeit, Portionen)
+**Keine zusätzlichen H2/H3 außer den genannten.** Optional am Ende: 1–2 interne Link-Ideen (ohne URL), als Fließtext.
 """
 
-# ---------------- Prompts ----------------
+# -------------------- Prompt-Templates --------------------
 
-DRAFT_TEMPLATE_DE = """Erstelle einen Rohentwurf gemäß Stil-, Struktur- und Konsistenz-Guide.
+DRAFT_TEMPLATE_DE = """Erstelle einen Rohentwurf gemäß Stilguide, Struktur-Guide und Beispielen.
 Thema: {topic}
 Pflichtdetails: {details}
 Primär-Keyword: {primary_kw}
 Sekundär-Keywords (optional): {secondary_kws}
-
+Gib **nur** den finalen Markdown-Artikel in der geforderten Struktur zurück (inkl. YAML-SEO-Block).
 Stilguide:
 {styleguide}
 
@@ -146,22 +137,23 @@ Struktur-Guide:
 Konsistenz-Guide:
 {consistency}
 
-Beispiele (Tonfall):
+Beispiele (Tonfallreferenz):
 {examples}
-
-Gib **nur** den finalen Markdown-Artikel in der geforderten Struktur zurück (inkl. YAML-SEO-Block).
 """
 
-EDIT_TEMPLATE_DE = """Überarbeite den Text gemäß den Guides.
-- **Ich-Perspektive** durchgängig (Einleitung & Hintergrund starten in Ich-Form).
-- Leser als „du“ ansprechen (für Tipps), ohne Erzählerrolle zu ändern.
-- Entferne Floskeln: {negative}
-- Bewahre die **exakte Struktur** (YAML-SEO-Block, H1; H2/H3 nur wie erlaubt).
-- **Keine zusätzlichen H2/H3** außer: Einleitung, Hintergrund & Tipps, Rezept: … (+ Variants H2 optional) und die drei H3 im Rezept.
-- Hintergrund: **2–4 Bullet-Tipps**, kompakt, keine Doppelungen.
-- Schritt für Schritt: **{min_steps}–{max_steps} Schritte**.
-- Zutaten mit Mengenangaben.
-- Länge **{min_words}–{max_words}** Wörter.
+EDIT_TEMPLATE_DE = """Überarbeite den Text gemäß Stil- und Struktur-Guide.
+- **Ich-Perspektive** durchgängig, **Einleitung** und **Hintergrund & Tipps** starten in Ich-Form und docken aneinander an.
+- Leser darf als „du“ adressiert werden, aber nicht die Erzählerrolle übernehmen.
+- **Rezeptteil „Schritt für Schritt“: du-/Imperativ-Form**, nummeriert (6–10 Schritte).
+- Tipps in „Hintergrund & Tipps“ als **Fließtext (2–4 Sätze, keine Liste)**.
+- Entferne Floskeln aus der Negativliste: {negative}
+- Wahrung der Struktur (YAML-SEO-Block, H1, H2/H3 exakt wie vorgegeben), **keine zusätzlichen H2/H3**.
+- Nutze Primär-Keyword in H1 + Einleitung (erste 100 Wörter) + mindestens 1 H2.
+- Variiere Satzlängen; erlaube rhetorische Fragen.
+- Füge 1–2 konkrete Beobachtungen/Details ein (Geräusch, Textur, Zahl).
+- Mengenangaben bei Zutaten prüfen/ergänzen.
+- Länge strikt {min_words}–{max_words} Wörter (keine Wortzahl ausgeben).
+Gib **nur** den finalen Markdown-Artikel zurück.
 
 Stilguide:
 {styleguide}
@@ -172,16 +164,20 @@ Struktur-Guide:
 Konsistenz-Guide:
 {consistency}
 
-Beispiele:
+Beispiele (Tonfallreferenz):
 {examples}
 
 Text:
 {draft}
 """
 
-CLEAN_TEMPLATE_DE = """Korrigiere Deutsch (Rechtschreibung, Grammatik, Zeichensetzung).
-- Erzählerstimme: **Ich**. „Du“-Ansprache für Hinweise okay.
-- Keine Strukturänderung, keine Floskeln.
+CLEAN_TEMPLATE_DE = """Korrigiere den folgenden Text in deutscher Sprache:
+- Behebe Rechtschreibung, Grammatik, Zeichensetzung und schiefe Formulierungen.
+- Schreibe konsequent in der **Ich-Perspektive** (ich/mir/mich/mein). Ersetze unpersönliche „man“-Konstruktionen
+  und unpassende „wir“-Formen durch „ich“, außer wenn „wir“ inhaltlich zwingend ist.
+- „Du“-Ansprache für Hinweise/Tipps bleibt erlaubt; im Abschnitt **„Schritt für Schritt“** klare **du-/Imperativ-Form**.
+- Vermeide formelle Anrede (Sie/Ihnen/Ihr ...).
+- Behalte Inhalt und Struktur bei.
 Gib NUR den bereinigten Text zurück.
 
 Text:
@@ -190,12 +186,23 @@ Text:
 
 COHERENCE_LINE = "\n\nWICHTIG: Einleitung und „Hintergrund & Tipps“ bilden **eine** Erzählung; im Hintergrund zuerst **an die Einleitung andocken**, nicht neu anfangen."
 
-# ---------------- Heuristiken ----------------
+# -------------------- Heuristiken + Struktur/SEO-Checks --------------------
 
 BANNED_PATTERNS = [re.compile(re.escape(p), flags=re.IGNORECASE) for p in NEGATIVE_LIST_DE]
 WORD_RE = re.compile(r"[A-Za-zÄÖÜäöüß\-']+", flags=re.UNICODE)
 SECOND_PERSON_WORDS = ["du", "dich", "dir", "dein", "deine", "deinen", "deinem", "deiner", "deines"]
 FORMAL_ADDRESS_WORDS = [r"\bSie\b", r"\bIhnen\b", r"\bIhr\b", r"\bIhre\b", r"\bIhrem\b", r"\bIhren\b", r"\bIhrer\b", r"\bIhres\b"]
+
+QUICK_DISH_HINTS = {
+    "porridge","toast","sandwich","omelett","omelette","rührei","wrap",
+    "smoothie","quark","skyr","joghurt","overnight oats","grießbrei"
+}
+
+SENSORY_LEX = [
+    "duft", "geruch", "aroma", "rauch", "rauschen", "wind", "knistern",
+    "brutzeln", "singen", "salzluft", "wärme", "kühle", "licht", "dämmerung",
+    "glut", "sand", "staub", "samtig", "knackig", "schmelzend"
+]
 
 def tokenize(text: str) -> List[str]:
     return WORD_RE.findall(text)
@@ -231,82 +238,47 @@ def count_second_person(text: str) -> int:
 def count_formal_address(text: str) -> int:
     return sum(len(re.findall(w, text)) for w in FORMAL_ADDRESS_WORDS)
 
-# ---------------- Struktur-Prüfungen ----------------
+def is_quick_recipe(topic: str, details: str) -> bool:
+    s = f"{topic} {details}".lower()
+    return any(k in s for k in QUICK_DISH_HINTS)
+
+def first_paragraph(text: str) -> str:
+    return text.split("\n\n", 1)[0] if text else ""
+
+def count_sensory_words(text: str) -> int:
+    t = text.lower()
+    return sum(t.count(w) for w in SENSORY_LEX)
+
+def check_structure(md: str, primary_kw: str) -> Dict[str, Any]:
+    checks: Dict[str, Any] = {}
+    # YAML frontmatter
+    checks["yaml_frontmatter"] = bool(re.search(r"^---\s*[\s\S]*?---\s*", md.strip()))
+    # H1
+    m_h1 = re.search(r"^#\s+(.+)", md, re.MULTILINE)
+    h1 = m_h1.group(1).strip() if m_h1 else ""
+    checks["h1_present"] = bool(h1)
+    checks["h1_contains_primary_kw"] = (primary_kw.lower() in h1.lower()) if primary_kw else True
+    # Required H2/H3
+    checks["h2_einleitung"] = bool(re.search(r"^##\s+Einleitung", md, re.MULTILINE))
+    checks["h2_bg_tipps"] = bool(re.search(r"^##\s+Hintergrund\s*&\s*Tipps", md, re.MULTILINE))
+    checks["h2_rezept"] = bool(re.search(r"^##\s+Rezept:", md, re.MULTILINE))
+    checks["h3_zutaten"] = bool(re.search(r"^###\s+Zutaten", md, re.MULTILINE))
+    checks["h3_schritte"] = bool(re.search(r"^###\s+Schritt\s+für\s+Schritt", md, reMULTILINE:=re.MULTILINE))
+    checks["h3_zeiten"] = bool(re.search(r"^###\s+Zeiten\s*&\s*Portionen", md, re.MULTILINE))
+    # Numbered steps count
+    steps = re.findall(r"^\d+\.\s", md, re.MULTILINE)
+    checks["steps_count"] = len(steps)
+    checks["steps_ok"] = 6 <= len(steps) <= 12
+    # Keyword in first 100 words (body without YAML)
+    body_without_yaml = re.sub(r"^---[\s\S]*?---", "", md).strip()
+    first100 = " ".join(tokenize(body_without_yaml)[:100]).lower()
+    checks["kw_in_first100"] = (primary_kw.lower() in first100) if primary_kw else True
+    return checks
 
 def extract_section(md: str, header: str) -> str:
     pat = rf"^##\s+{re.escape(header)}\s*\n([\s\S]*?)(?=\n##\s+|$)"
     m = re.search(pat, md, re.MULTILINE)
     return m.group(1).strip() if m else ""
-
-def yaml_present(md: str) -> bool:
-    return bool(re.search(r"^---\s*[\s\S]*?---\s*", md.strip()))
-
-def seo_lengths(md: str) -> Dict[str, Any]:
-    title = ""
-    desc = ""
-    m = re.search(r'seo_title:\s*"([^"]+)"', md)
-    if m: title = m.group(1)
-    m = re.search(r'meta_description:\s*"([^"]+)"', md)
-    if m: desc = m.group(1)
-    return {
-        "title_len": len(title),
-        "title_ok": 10 <= len(title) <= 60,
-        "meta_len": len(desc),
-        "meta_ok": 50 <= len(desc) <= 155
-    }
-
-def check_structure(md: str, primary_kw: str) -> Dict[str, Any]:
-    checks: Dict[str, Any] = {}
-    checks["yaml_frontmatter"] = yaml_present(md)
-
-    m_h1 = re.search(r"^#\s+(.+)", md, re.MULTILINE)
-    h1 = m_h1.group(1).strip() if m_h1 else ""
-    checks["h1_present"] = bool(h1)
-    checks["h1_contains_primary_kw"] = (primary_kw.lower() in h1.lower()) if primary_kw else True
-
-    # H2 erlaubt
-    h2_all = re.findall(r"^##\s+(.+)$", md, re.MULTILINE)
-    checks["h2_all"] = h2_all
-    # Rezept-H3
-    rezept_block = re.search(r"^##\s+Rezept:.*?(?=\n##\s+|$)", md, re.MULTILINE | re.DOTALL)
-    h3_in_rezept = re.findall(r"^###\s+(.+)$", rezept_block.group(0), re.MULTILINE) if rezept_block else []
-    checks["h3_in_rezept"] = h3_in_rezept
-
-    # Pflicht-H2 und H3 vorhanden?
-    checks["h2_einleitung"] = "Einleitung" in h2_all
-    checks["h2_bg_tipps"] = "Hintergrund & Tipps" in h2_all
-    checks["h2_rezept"] = any(h.startswith("Rezept:") for h in h2_all)
-    checks["h3_zutaten"] = "Zutaten" in h3_in_rezept
-    checks["h3_schritte"] = "Schritt für Schritt" in h3_in_rezept
-    checks["h3_zeiten"] = "Zeiten & Portionen" in h3_in_rezept
-
-    # Steps zählen
-    steps = re.findall(r"^\d+\.\s", md, re.MULTILINE)
-    checks["steps_count"] = len(steps)
-    checks["steps_ok"] = MIN_STEPS <= len(steps) <= MAX_STEPS
-
-    # Keyword in ersten 100 Worten
-    body_without_yaml = re.sub(r"^---[\s\S]*?---", "", md).strip()
-    first100 = " ".join(tokenize(body_without_yaml)[:100]).lower()
-    checks["kw_in_first100"] = (primary_kw.lower() in first100) if primary_kw else True
-
-    # Verbotene/zusätzliche H2/H3
-    forbidden_h2_present = any(h in FORBIDDEN_H2 for h in h2_all)
-    extra_h2 = [h for h in h2_all if (h not in ALLOWED_H2 and not h.startswith("Rezept:") and h != "Varianten")]
-    extra_h3 = [h for h in h3_in_rezept if h not in ALLOWED_H3_IN_REZEPT]
-    checks["forbidden_h2_present"] = forbidden_h2_present
-    checks["extra_h2"] = extra_h2
-    checks["extra_h3"] = extra_h3
-
-    return checks
-
-FIRST_PERSON_SET = {"ich","mir","mich","mein","meine","meinem","meinen","meiner","meines"}
-
-def ich_in_first100(md: str) -> bool:
-    body_without_yaml = re.sub(r"^---[\s\S]*?---", "", md).strip()
-    tokens = [t.lower() for t in tokenize(body_without_yaml)]
-    window = tokens[:100]
-    return any(tok in FIRST_PERSON_SET for tok in window)
 
 def contains_destination(text: str, dest: str) -> bool:
     if not dest:
@@ -317,9 +289,11 @@ def coherence_checks(md: str, destination: str) -> Dict[str, Any]:
     intro = extract_section(md, "Einleitung")
     bg = extract_section(md, "Hintergrund & Tipps")
 
+    # Ziel in Einleitung & am Anfang des Hintergrunds
     intro_has_dest = contains_destination(intro, destination)
     bg_has_dest = contains_destination(bg[:200], destination) if bg else True
 
+    # Hintergrund beginnt mit Brücke / Anschluss an Einleitung
     first_bg_sentence = ""
     if bg:
         first_bg_sentence = re.split(r"[.!?]\s", bg.strip(), maxsplit=1)[0].lower()
@@ -328,181 +302,173 @@ def coherence_checks(md: str, destination: str) -> Dict[str, Any]:
         bool(destination) and destination.lower() in first_bg_sentence
     )
 
+    # Kennzahlen erste Hintergrund-Passage
+    bg_para = first_paragraph(bg)
+    bg_sentences = [s for s in re.split(r"[.!?]+", bg_para) if tokenize(s)]
+    bg_sensory = count_sensory_words(bg_para)
+
     ok = intro_has_dest and bg_has_dest and bridge_ok
-    return {"intro_has_dest": intro_has_dest, "bg_has_dest": bg_has_dest, "bridge_ok": bridge_ok, "ok": ok}
+    return {
+        "intro_has_dest": intro_has_dest,
+        "bg_has_dest": bg_has_dest,
+        "bridge_ok": bridge_ok,
+        "bg_first_para_sentence_count": len(bg_sentences),
+        "bg_first_para_sensory": bg_sensory,
+        "ok": ok
+    }
 
-# ---------------- Normalisierung ----------------
+def seo_lengths(md: str) -> Dict[str, Any]:
+    title = ""
+    desc = ""
+    m = re.search(r'seo_title:\s*"([^"]+)"', md)
+    if m:
+        title = m.group(1)
+    m = re.search(r'meta_description:\s*"([^"]+)"', md)
+    if m:
+        desc = m.group(1)
+    return {
+        "title_len": len(title),
+        "title_ok": 10 <= len(title) <= 60,
+        "meta_len": len(desc),
+        "meta_ok": 50 <= len(desc) <= 155
+    }
 
-def dedupe_lines_keep_order(lines: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for ln in lines:
-        key = re.sub(r"\s+", " ", ln.strip().lower())
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append(ln.strip())
-    return out
+# -------------------- LLM Call (Claude) --------------------
 
-def cap_bullets(block: str, cap: int) -> str:
-    bullets = re.findall(r"^\s*[-*]\s+.+$", block, re.MULTILINE)
-    if len(bullets) <= cap:
-        return block
-    # Keep first `cap` bullets
-    kept = 0
-    lines = block.splitlines()
-    out = []
-    for ln in lines:
-        if re.match(r"^\s*[-*]\s+.+$", ln) and kept < cap:
-            out.append(ln)
-            kept += 1
-        elif re.match(r"^\s*[-*]\s+.+$", ln) and kept >= cap:
-            continue
+def _anthropic_text_from_content(resp: "anthropic.types.Message") -> str:
+    parts: List[str] = []
+    for block in resp.content:
+        if getattr(block, "type", None) == "text":
+            parts.append(block.text)
+    return "\n".join(parts).strip()
+
+def call_claude(
+    model: str,
+    messages: List[Dict[str, str]],
+    temperature: float = 0.8,
+    top_p: float = 0.9,
+    num_predict: int = 6000,
+) -> str:
+    client = anthropic.Anthropic()  # liest ANTHROPIC_API_KEY aus der Umgebung
+    system_txt = ""
+    msg_list: List[Dict[str, str]] = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "system":
+            system_txt = f"{system_txt}\n\n{content}".strip() if system_txt else content
         else:
-            out.append(ln)
-    return "\n".join(out)
-
-def renumber_steps(block: str) -> str:
-    steps = re.findall(r"^\s*(\d+)\.\s+.+$", block, re.MULTILINE)
-    if not steps:
-        return block
-    lines = block.splitlines()
-    new_lines = []
-    idx = 1
-    for ln in lines:
-        if re.match(r"^\s*\d+\.\s+.+$", ln):
-            if idx > MAX_STEPS:
-                # drop extra steps
-                continue
-            ln = re.sub(r"^\s*\d+\.\s+", f"{idx}. ", ln)
-            idx += 1
-        new_lines.append(ln)
-    return "\n".join(new_lines)
-
-def unify_tips_in_background(md: str) -> str:
-    bg = extract_section(md, "Hintergrund & Tipps")
-    if not bg:
-        return md
-    # Sammle Tipp-Zeilen („Tipp …:“) + Bullets
-    tip_lines = re.findall(r"(?im)^tipp\s*\d*\s*:\s*(.+)$", bg)
-    bullet_lines = re.findall(r"(?m)^\s*[-*]\s+(.+)$", bg)
-    tips = tip_lines + bullet_lines
-    tips = [re.sub(r"[.!?]\s*$", "", t).strip() for t in tips]
-    tips = dedupe_lines_keep_order(tips)[:MAX_TIPS]
-
-    # baue neuen BG-Block: erster Absatz (ohne alte Tipp-Zeilen) + konsolidierte Bulletliste (max MAX_TIPS)
-    bg_no_tips = []
-    for ln in bg.splitlines():
-        if re.match(r"(?i)^\s*tipp\s*\d*\s*:", ln) or re.match(r"^\s*[-*]\s+.+$", ln):
-            continue
-        bg_no_tips.append(ln)
-    bg_no_tips_txt = "\n".join(bg_no_tips).strip()
-    if tips:
-        bullets = "\n".join(f"- {t}" for t in tips)
-        bg_clean = bg_no_tips_txt + ("\n\n" if bg_no_tips_txt else "") + bullets
-    else:
-        bg_clean = bg_no_tips_txt
-
-    # cap bullets
-    bg_clean = cap_bullets(bg_clean, MAX_TIPS)
-
-    # ersetze im md
-    return re.sub(
-        rf"(^##\s+Hintergrund\s*&\s*Tipps\s*\n)[\s\S]*?(?=\n##\s+|$)",
-        r"\1" + bg_clean + "\n",
-        md, flags=re.MULTILINE
+            msg_list.append({"role": role, "content": content})
+    if not any(m["role"] == "user" for m in msg_list):
+        msg_list.append({"role": "user", "content": ""})
+    resp = client.messages.create(
+        model=model,
+        max_tokens=num_predict,
+        temperature=temperature,
+        top_p=top_p,
+        system=system_txt or None,
+        messages=msg_list,
     )
+    return _anthropic_text_from_content(resp)
 
-def drop_forbidden_sections(md: str) -> str:
-    # Entferne nicht erlaubte H2 vollständig
-    for h in list(FORBIDDEN_H2):
-        md = re.sub(rf"^##\s+{re.escape(h)}\s*\n[\s\S]*?(?=\n##\s+|$)", "", md, flags=re.MULTILINE)
-    # Entferne alle extra H2 außer erlaubte und „Rezept:“ / „Varianten“
-    h2_all = re.findall(r"^##\s+(.+)$", md, re.MULTILINE)
-    for h in h2_all:
-        if h in ALLOWED_H2 or h == "Varianten" or h.startswith("Rezept:"):
-            continue
-        md = re.sub(rf"^##\s+{re.escape(h)}\s*\n[\s\S]*?(?=\n##\s+|$)", "", md, flags=re.MULTILINE)
-    return md
+FIRST_PERSON_SET = {"ich","mir","mich","mein","meine","meinem","meinen","meiner","meines"}
 
-def keep_only_variants_once(md: str) -> str:
-    # Nur eine H2 „Varianten“ zulassen und maximal MAX_VARIANTS Bullets behalten
-    parts = re.split(r"(^##\s+Varianten\s*$)", md, flags=re.MULTILINE)
-    if len(parts) <= 1:
-        return md
-    # Teile wie [..., "## Varianten", content, ..., "## Varianten", content, ...]
-    first_idx = None
-    content_after = ""
-    i = 0
-    while i < len(parts):
-        if parts[i].strip().startswith("## Varianten"):
-            if first_idx is None:
-                first_idx = i
-                # nimm den ersten Content-Block
-                if i + 1 < len(parts):
-                    content_after = parts[i+1]
-            else:
-                # drop spätere Varianten-Blocks
-                if i + 1 < len(parts):
-                    parts[i] = ""
-                    parts[i+1] = ""
-        i += 1
-    # cap bullets im ersten
-    if first_idx is not None:
-        content_after = cap_bullets(content_after, MAX_VARIANTS)
-        # wieder einsetzen
-        parts[first_idx+1] = content_after
-    return "".join(parts)
+def ich_in_first100(md: str) -> bool:
+    body_without_yaml = re.sub(r"^---[\s\S]*?---", "", md).strip()
+    tokens = [t.lower() for t in tokenize(body_without_yaml)]
+    window = tokens[:100]
+    return any(tok in FIRST_PERSON_SET for tok in window)
 
-def clamp_list_lengths(md: str) -> str:
-    # Begrenzt beliebige Bulletlisten auf MAX_BULLETS_PER_LIST
-    def _cap_block(m):
-        return cap_bullets(m.group(0), MAX_BULLETS_PER_LIST)
-    return re.sub(r"(^(\s*[-*]\s+.+\n)+)", _cap_block, md, flags=re.MULTILINE)
+# -------------------- Story Hooks --------------------
 
-def normalize_blanklines(md: str) -> str:
-    md = re.sub(r"\n{3,}", "\n\n", md)
-    md = md.strip() + "\n"
-    return md
+def sentence_span(story_len: str) -> Tuple[int, int]:
+    if story_len == "short": return (3, 4)
+    if story_len == "long":  return (8, 10)
+    return (5, 7)  # medium
 
-def renumber_and_limit_steps(md: str) -> str:
-    # Finde Rezept-Block und renummeriere dort die Schritte
-    rezept = re.search(r"(^##\s+Rezept:[\s\S]*?$)", md, flags=re.MULTILINE)
-    if not rezept:
-        return md
-    block = rezept.group(1)
-    block = re.sub(
-        r"(^###\s+Schritt\s+für\s+Schritt\s*\n)([\s\S]*?)(?=\n###\s+|\Z)",
-        lambda m: m.group(1) + renumber_steps(m.group(2)),
-        block, flags=re.MULTILINE
-    )
-    # setze Block zurück
-    md = re.sub(r"(^##\s+Rezept:[\s\S]*?$)", block, md, flags=re.MULTILINE)
-    return md
+def build_travel_story_hook(dest: str, angle: str, places_csv: str, smin: int, smax: int) -> str:
+    place_line = f"- Verwende diese konkreten Bezüge: {places_csv}.\n" if places_csv.strip() else ""
+    return f"""
+Zusatzanforderung (Reise-Mini-Story):
+- Beginne **„Hintergrund & Tipps“** mit **{smin}–{smax} Sätzen** in **Ich-Perspektive** als **konkrete Szene** (Zeitpunkt, Ort, Handlung).
+- Verknüpfe **direkt** mit der Einleitung (kein neuer Start) oder markiere sauber als Rückblende.
+- Erwähne **{dest}** im ersten Satz und beziehe dich auf **{angle}**.
+{place_line}- Nutze mind. **2 Sinnesdetails** (Geruch/Geräusch/Licht/Temperatur) und **1 Logistikdetail** (Straße/Markt/Stellplatz).
+- Schliesse mit **warum das Gericht genau dort passt** und leite zur Tipp-Phase über.
+"""
 
-def dedupe_whole_doc_lines(md: str) -> str:
-    lines = md.splitlines()
-    # Nicht YAML block dedupen
-    if md.strip().startswith("---"):
-        parts = re.split(r"(^---[\s\S]*?---\s*)", md, maxsplit=1)
-        yaml = parts[1]
-        rest = parts[2] if len(parts) > 2 else ""
-        rest_lines = dedupe_lines_keep_order(rest.splitlines())
-        return yaml + "\n" + "\n".join(rest_lines) + "\n"
-    else:
-        return "\n".join(dedupe_lines_keep_order(lines)) + "\n"
+def build_history_hook(topic: str, primary_kw: str, smin: int, smax: int) -> str:
+    label = primary_kw or topic
+    return f"""
+Alternative (kulinarische Herkunft):
+- Starte **„Hintergrund & Tipps“** mit **{smin}–{smax} Sätzen** zur **Herkunft/Kultur** von „{label}“.
+- **Keine exakten Jahreszahlen/umstrittenen Behauptungen**; allgemeiner Kontext (Region, typische Zutaten, Essanlass), wertfrei.
+- Danach **direkt** in praktische Tipps übergehen (2–3 Sätze, keine Liste).
+"""
 
-def normalize_markdown(md: str) -> str:
-    md = drop_forbidden_sections(md)
-    md = unify_tips_in_background(md)
-    md = keep_only_variants_once(md)
-    md = clamp_list_lengths(md)
-    md = renumber_and_limit_steps(md)
-    md = dedupe_whole_doc_lines(md)
-    md = normalize_blanklines(md)
-    return md
+def build_story_enrich_prompt(base_text: str, mode: str, dest: str, angle: str,
+                              smin: int, smax: int, places: str,
+                              style: str, structure: str, consistency: str, negative: str) -> str:
+    if mode == "travel":
+        p_line = f"- Nutze diese Bezüge: {places}.\n" if places.strip() else ""
+        return f"""Erweitere die Reise-Mini-Story am Anfang von „Hintergrund & Tipps“:
+- Schreibe **{smin}–{smax} Sätze** in Ich-Perspektive als **konkrete Szene** (Zeitpunkt, Ort, Handlung).
+- Erster Satz nennt **{dest}**, Bezug auf **{angle}**. {p_line}- Mindestens **2 Sinnesdetails** und **1 Logistikdetail**.
+- Schliesse mit **warum das Gericht dazu passt** und leite in **2–3 Sätze** praktische Tipps über (Fließtext, keine Liste).
+- Kein neuer Szenenstart; sauber an die Einleitung andocken.
 
-# ---------------- Quality-Eval ----------------
+Stilguide:
+{style}
+
+Struktur-Guide:
+{structure}
+
+Konsistenz-Guide:
+{consistency}
+
+Vermeide Floskeln: {negative}
+
+Text:
+{base_text}
+"""
+    else:  # history
+        return f"""Ersetze/ergänze den Auftakt von „Hintergrund & Tipps“ durch eine **{smin}–{smax}-sätzige** Herkunfts-/Kultur-Mini-Note:
+- Allgemeiner Kontext (Region, typische Zutaten, Essanlass), **keine exakten Jahreszahlen/umstrittenen Behauptungen**.
+- Danach direkt und knapp in praktische Tipps (2–3 Sätze, keine Liste) überleiten.
+- Ich-Perspektive in der Überleitung beibehalten.
+
+Stilguide:
+{style}
+
+Struktur-Guide:
+{structure}
+
+Konsistenz-Guide:
+{consistency}
+
+Vermeide Floskeln: {negative}
+
+Text:
+{base_text}
+"""
+
+# -------------------- Pipeline-Checks --------------------
+
+def seo_lengths(md: str) -> Dict[str, Any]:
+    title = ""
+    desc = ""
+    m = re.search(r'seo_title:\s*"([^"]+)"', md)
+    if m:
+        title = m.group(1)
+    m = re.search(r'meta_description:\s*"([^"]+)"', md)
+    if m:
+        desc = m.group(1)
+    return {
+        "title_len": len(title),
+        "title_ok": 10 <= len(title) <= 60,
+        "meta_len": len(desc),
+        "meta_ok": 50 <= len(desc) <= 155
+    }
 
 def evaluate_quality(text: str, targets: Dict[str, Any], primary_kw: str, destination: str = "") -> Tuple[bool, Dict[str, Any]]:
     style_metrics = {
@@ -520,12 +486,16 @@ def evaluate_quality(text: str, targets: Dict[str, Any], primary_kw: str, destin
     coherence = coherence_checks(text, destination)
     ich_intro_ok = ich_in_first100(text)
 
-    # Überschriften/Liste-Disziplin
-    headings_ok = (
-        not structure["forbidden_h2_present"] and
-        len(structure["extra_h2"]) == 0 and
-        len(structure["extra_h3"]) == 0
-    )
+    # Story-Targets
+    story_type = targets.get("story_type", "auto")
+    min_story_sent = targets.get("story_min_sent", 0)
+    min_sensory = targets.get("story_min_sensory", 0)
+    story_ok = True
+    if story_type in ("travel", "history"):
+        story_ok = (
+            coherence["bg_first_para_sentence_count"] >= min_story_sent and
+            (coherence["bg_first_para_sensory"] >= min_sensory if story_type == "travel" else True)
+        )
 
     ok = (
         not style_metrics["has_banned"] and
@@ -545,205 +515,44 @@ def evaluate_quality(text: str, targets: Dict[str, Any], primary_kw: str, destin
             seo_meta["title_ok"], seo_meta["meta_ok"]
         ]) and
         coherence["ok"] and
-        headings_ok
+        story_ok
     )
     return ok, {
         "style_metrics": style_metrics,
         "structure": structure,
         "seo_meta": seo_meta,
         "coherence": coherence,
-        "ich_intro_ok": ich_intro_ok,
-        "headings_ok": headings_ok
+        "story_requirements": {
+            "type": story_type,
+            "min_sentences": min_story_sent,
+            "min_sensory": (min_sensory if story_type == "travel" else 0),
+            "met": story_ok
+        },
+        "ich_intro_ok": ich_intro_ok
     }
 
-# ---------------- Anthropic Call ----------------
-
-def _anthropic_text_from_content(resp: "anthropic.types.Message") -> str:
-    parts: List[str] = []
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            parts.append(block.text)
-    return "\n".join(parts).strip()
-
-def call_claude(
-    model: str,
-    messages: List[Dict[str, str]],
-    temperature: float = 0.8,
-    top_p: float = 0.9,
-    num_predict: int = 6000,
-) -> str:
-    client = anthropic.Anthropic()
-    system_txt = ""
-    msg_list: List[Dict[str, str]] = []
-    for m in messages:
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        if role == "system":
-            system_txt = f"{system_txt}\n\n{content}".strip() if system_txt else content
-        else:
-            msg_list.append({"role": role, "content": content})
-    if not any(m["role"] == "user" for m in msg_list):
-        msg_list.append({"role": "user", "content": ""})
-    resp = client.messages.create(
-        model=model, max_tokens=num_predict, temperature=temperature, top_p=top_p,
-        system=system_txt or None, messages=msg_list,
-    )
-    return _anthropic_text_from_content(resp)
-
-# ---------------- Repair-Prompts ----------------
-
-def build_expand_prompt(base_text: str, min_words: int, max_words: int, negative: str, style: str, structure: str, examples: str, consistency: str) -> str:
-    return f"""Erweitere substanziell auf {min_words}–{max_words} Wörter.
-- **Keine neuen H2/H3**. Erlaubt sind nur die im Struktur-Guide.
-- Hintergrund mit **max. {MAX_TIPS} kompakten Bullets**, keine Doppelungen.
-- Schritt für Schritt auf **{MIN_STEPS}–{MAX_STEPS}** begrenzen.
-- Vermeide Floskeln: {negative}
-
-Stilguide:
-{style}
-
-Struktur-Guide:
-{structure}
-
-Konsistenz-Guide:
-{consistency}
-
-Beispiele:
-{examples}
-
-Text:
-{base_text}
-"""
-
-def build_condense_prompt(base_text: str, min_words: int, max_words: int, negative: str, style: str, structure: str, examples: str, consistency: str) -> str:
-    return f"""Kürze präzise auf {min_words}–{max_words} Wörter.
-- Keine Dopplungen, keine Zusatz-H2.
-- Hintergrund auf **max. {MAX_TIPS} Bullets** konsolidieren.
-- Schritte auf **{MIN_STEPS}–{MAX_STEPS}** begrenzen.
-
-Stilguide:
-{style}
-
-Struktur-Guide:
-{structure}
-
-Konsistenz-Guide:
-{consistency}
-
-Beispiele:
-{examples}
-
-Text:
-{base_text}
-"""
-
-def build_du_rewrite_prompt(base_text: str, negative: str, style: str) -> str:
-    return f"""Passe die Leseransprache auf **du** an (du/dich/dir/dein …).
-- Erzähler bleibt **ich** (Ich-Perspektive unverändert).
-- Entferne formelle Anreden. Vermeide Floskeln: {negative}
-Gib nur den Text zurück.
-
-Stil:
-{style}
-
-Text:
-{base_text}
-"""
-
-def build_ich_rewrite_prompt(base_text: str, negative: str, style: str) -> str:
-    return f"""Schreibe konsequent in **Ich-Perspektive** (ich/mir/mich/mein …).
-- Einleitung und Hintergrund starten in Ich-Form; „du“ nur als Adressat für Tipps.
-- Ohne Strukturänderung; Floskeln vermeiden: {negative}
-Gib nur den Text zurück.
-
-Stil:
-{style}
-
-Text:
-{base_text}
-"""
-
-def build_structure_fix_prompt(base_text: str, primary_kw: str, negative: str, style: str, structure: str, examples: str, consistency: str) -> str:
-    return f"""Bringe den Artikel exakt in die geforderte Struktur:
-- YAML-SEO vollständig & valide (seo_title ≤60, meta 50–155, slug kebab-case).
-- H1 enthält Primär-Keyword: "{primary_kw}".
-- Erlaubte H2/H3 **ausschließlich** laut Struktur-Guide.
-- Hintergrund: **2–4 Bullets**, keine Doppelungen.
-- Schritte: **{MIN_STEPS}–{MAX_STEPS}**.
-- Floskeln vermeiden: {negative}
-
-Stil:
-{style}
-
-Struktur:
-{structure}
-
-Konsistenz:
-{consistency}
-
-Beispiele:
-{examples}
-
-Text:
-{base_text}
-"""
-
-def build_coherence_fix_prompt(base_text: str, destination: str, style: str, structure: str, consistency: str, negative: str) -> str:
-    dest_line = f"- Nenne **{destination}** in Einleitung und im ersten Satz des Hintergrunds.\n" if destination else ""
-    return f"""Füge Einleitung & Hintergrund zu einer einheitlichen Erzählung:
-- Erste Sätze im Hintergrund docken klar an die Einleitung an (oder saubere Rückblende).
-{dest_line}- Keine neue Startszene. Keine Extra-H2/H3. Floskeln vermeiden: {negative}
-
-Stil:
-{style}
-
-Struktur:
-{structure}
-
-Konsistenz:
-{consistency}
-
-Text:
-{base_text}
-"""
-
-def build_simplify_structure_prompt(base_text: str, style: str, structure: str, consistency: str, negative: str) -> str:
-    return f"""Verschlanke die Struktur strikt:
-- **Entferne** alle H2 außer: Einleitung, Hintergrund & Tipps, Rezept: …, (optional) Varianten.
-- Im Rezept nur H3: Zutaten, Schritt für Schritt, Zeiten & Portionen.
-- Hintergrund: bündele verstreute Tipps zu **max. {MAX_TIPS} kompakten Bullets**, ohne Doppelungen.
-- Schritte auf **{MIN_STEPS}–{MAX_STEPS}** begrenzen.
-- Floskeln vermeiden: {negative}. Ich-Perspektive beibehalten.
-Gib nur den bereinigten Artikel zurück.
-
-Stil:
-{style}
-
-Struktur:
-{structure}
-
-Konsistenz:
-{consistency}
-
-Text:
-{base_text}
-"""
-
-# ---------------- Ziel-Mapping (Auto-Guess) ----------------
+# -------------------- Ziel-Ort Heuristik --------------------
 
 def guess_destination(text: str) -> str:
     s = text.lower()
     mapping = {
-        "shakshuka": "Israel", "pad thai": "Thailand", "carbonara": "Italien",
-        "khachapuri": "Georgien", "arepas": "Kolumbien", "laksa": "Malaysia",
-        "ratatouille": "Frankreich", "paella": "Spanien", "chili": "USA", "bibimbap": "Südkorea",
+        "shakshuka": "Israel",
+        "pad thai": "Thailand",
+        "carbonara": "Italien",
+        "khachapuri": "Georgien",
+        "arepas": "Kolumbien",
+        "laksa": "Malaysia",
+        "ratatouille": "Frankreich",
+        "paella": "Spanien",
+        "chili": "USA",
+        "bibimbap": "Südkorea",
     }
     for dish, dest in mapping.items():
         if dish in s:
             return dest
     return ""
 
-# ---------------- Pipeline ----------------
+# -------------------- Haupt-Pipeline --------------------
 
 def generate_article(
     topic: str,
@@ -755,6 +564,9 @@ def generate_article(
     max_words: int = 1000,
     destination: str = "",
     travel_angle: str = "Vanlife/Rundreise",
+    story_mode: str = "auto",
+    story_len: str = "medium",
+    story_places: str = "",
 ) -> Dict[str, Any]:
 
     system = SYSTEM_PROMPT_DE
@@ -767,17 +579,23 @@ def generate_article(
     pk = primary_kw.strip() if primary_kw.strip() else topic
     sk = secondary_kws.strip() if secondary_kws.strip() else "Rezept, Outdoor, Kochen, Backen"
 
-    # Reiseziel-Story Zusatz
+    # --- Story-Modus bestimmen ---
+    auto_quick = is_quick_recipe(topic, details)
+    if story_mode == "auto":
+        eff_story = "history" if auto_quick else "travel"
+    else:
+        eff_story = story_mode
+
+    smin, smax = sentence_span(story_len)
+
     dest = (destination or guess_destination(f"{topic} {pk}")).strip()
     angle = (travel_angle or "Vanlife/Rundreise").strip()
-    travel_hook = ""
-    if dest:
-        travel_hook = f"""
-Zusatzanforderung (Reiseziel-Story):
-- Beginne **H2 „Hintergrund & Tipps“** mit Anschluss an die Einleitung (kein neuer Start).
-- Nenne **{dest}** im ersten Satz; Bezug auf **{angle}** (z. B. Campen/Roadtrip) und 1–2 konkrete Details (Geräusch, Geruch, Licht).
-- Erkläre kurz, **warum das Gericht dort passt**. Danach die Bullet-Tipps.
-"""
+
+    hook_text = ""
+    if eff_story == "travel" and dest:
+        hook_text = build_travel_story_hook(dest, angle, story_places, smin, smax)
+    elif eff_story == "history":
+        hook_text = build_history_hook(topic, pk, max(3, smin-1), max(5, smax-2))
 
     # Pass 1: Draft
     draft = call_claude(
@@ -787,11 +605,10 @@ Zusatzanforderung (Reiseziel-Story):
             {"role": "user", "content": DRAFT_TEMPLATE_DE.format(
                 topic=topic, details=details, primary_kw=pk, secondary_kws=sk,
                 styleguide=style, structure=structure, examples=examples, consistency=consistency
-            ) + (travel_hook or "") + COHERENCE_LINE},
+            ) + (hook_text or "") + COHERENCE_LINE},
         ],
         num_predict=4096, temperature=0.8, top_p=0.9
     )
-    draft = normalize_markdown(draft)
 
     # Pass 1.5: Clean
     cleaned = call_claude(
@@ -802,9 +619,8 @@ Zusatzanforderung (Reiseziel-Story):
         ],
         temperature=0.4, top_p=0.9, num_predict=4096
     )
-    cleaned = normalize_markdown(cleaned)
 
-    # Pass 2: Edit
+    # Pass 2: Style-Edit
     edited = call_claude(
         model,
         [
@@ -812,15 +628,13 @@ Zusatzanforderung (Reiseziel-Story):
             {"role": "user", "content": EDIT_TEMPLATE_DE.format(
                 styleguide=style, negative=negative, draft=cleaned,
                 min_words=min_words, max_words=max_words,
-                min_steps=MIN_STEPS, max_steps=MAX_STEPS,
                 structure=structure, examples=examples, consistency=consistency
-            ) + (travel_hook or "") + COHERENCE_LINE},
+            ) + (hook_text or "") + COHERENCE_LINE},
         ],
         temperature=0.6, top_p=0.9, num_predict=4096
     )
-    edited = normalize_markdown(edited)
 
-    # Qualität prüfen
+    # Qualität prüfen (Stil + Struktur + SEO + Story)
     targets = dict(
         min_ttr=0.45,
         min_var_sentence_len=7.0,
@@ -830,10 +644,13 @@ Zusatzanforderung (Reiseziel-Story):
         max_words=max_words,
         min_second_person=2,
         max_formal_address=0,
+        story_type=eff_story,
+        story_min_sent=(smin if eff_story in ("travel","history") else 0),
+        story_min_sensory=(1 if eff_story == "travel" else 0),
     )
     ok, metrics = evaluate_quality(edited, targets, pk, destination=dest)
 
-    # Auto-Repair
+    # Auto-Repair (bis zu 6 Versuche)
     attempts = 0
     while not ok and attempts < 6:
         attempts += 1
@@ -842,29 +659,47 @@ Zusatzanforderung (Reiseziel-Story):
         seo = metrics["seo_meta"]
         ich_intro_ok = metrics.get("ich_intro_ok", False)
         coh = metrics.get("coherence", {"ok": True})
-        headings_ok = metrics.get("headings_ok", True)
+        story_req = metrics.get("story_requirements", {"type": "auto", "met": True})
 
         if sm["first_person"] < targets["min_first_person"] or not ich_intro_ok:
             repair_prompt = build_ich_rewrite_prompt(edited, negative, style)
+        elif story_req.get("type") in ("travel","history") and not story_req.get("met"):
+            repair_prompt = build_story_enrich_prompt(
+                edited, story_req["type"], dest, angle, smin, smax, story_places,
+                style, structure, consistency, negative
+            )
         elif not coh.get("ok", True):
-            repair_prompt = build_coherence_fix_prompt(edited, dest, style, structure, consistency, negative)
-        elif not headings_ok:
-            repair_prompt = build_simplify_structure_prompt(edited, style, structure, consistency, negative)
+            repair_prompt = build_story_enrich_prompt(
+                edited, (eff_story if eff_story in ("travel","history") else "history"),
+                dest, angle, smin, smax, story_places, style, structure, consistency, negative
+            )
         elif sm["formal_address"] > 0 or sm["second_person"] < targets["min_second_person"]:
             repair_prompt = build_du_rewrite_prompt(edited, negative, style)
         elif not all([
             stc["yaml_frontmatter"], stc["h1_present"],
             stc["h2_einleitung"], stc["h2_bg_tipps"], stc["h2_rezept"],
             stc["h3_zutaten"], stc["h3_schritte"], stc["h3_zeiten"],
-            stc["steps_ok"], stc["kw_in_first100"], seo["title_ok"], seo["meta_ok"]
+            stc["steps_ok"], stc["kw_in_first100"],
+            seo["title_ok"], seo["meta_ok"]
         ]):
-            repair_prompt = build_structure_fix_prompt(edited, pk, negative, style, structure, examples, consistency)
+            repair_prompt = build_structure_fix_prompt(edited, pk, negative, style, structure, examples)
         elif sm["words"] < min_words:
-            repair_prompt = build_expand_prompt(edited, min_words, max_words, negative, style, structure, examples, consistency)
+            repair_prompt = build_expand_prompt(edited, min_words, max_words, negative, style, structure, examples)
         elif sm["words"] > max_words:
-            repair_prompt = build_condense_prompt(edited, min_words, max_words, negative, style, structure, examples, consistency)
+            repair_prompt = build_condense_prompt(edited, min_words, max_words, negative, style, structure, examples)
         else:
-            repair_prompt = build_simplify_structure_prompt(edited, style, structure, consistency, negative)
+            repair_prompt = f"""Überarbeite den Artikel gezielt:
+- Halte Ich-Perspektive streng durch; im Rezeptteil **du-/Imperativ-Form**.
+- Entferne restliche Floskeln ({negative}) und erhöhe Satzlängen-Varianz.
+- Füge ≥2 konkrete Zahlen/Zeiten/Mengen hinzu.
+- Halte Länge {min_words}–{max_words}, bewahre Struktur & YAML-SEO-Block (keine zusätzlichen H2/H3).
+
+Struktur-Guide:
+{structure}
+
+Text:
+{edited}
+"""
 
         edited = call_claude(
             model,
@@ -872,31 +707,34 @@ Zusatzanforderung (Reiseziel-Story):
              {"role": "user", "content": repair_prompt}],
             temperature=0.5, top_p=0.9, num_predict=4096
         )
-        edited = normalize_markdown(edited)
         ok, metrics = evaluate_quality(edited, targets, pk, destination=dest)
 
-    # Harte Absicherung bei zu kurz
+    # Harte Absicherung: Falls immer noch zu kurz → 2 Force-Expand-Runden
     if not ok and metrics["style_metrics"]["words"] < min_words:
         for _ in range(2):
             edited = call_claude(
                 model,
                 [{"role": "system", "content": system},
                  {"role": "user", "content": build_expand_prompt(
-                     edited, min_words, max_words, negative, style, structure, examples, consistency
+                     edited, min_words, max_words, negative, style, structure, examples
                  )}],
                 temperature=0.5, top_p=0.9, num_predict=4096
             )
-            edited = normalize_markdown(edited)
             ok, metrics = evaluate_quality(edited, targets, pk, destination=dest)
             if ok:
                 break
 
-    return {"draft": draft, "final": edited, "metrics": metrics, "passed_heuristics": ok}
+    return {
+        "draft": draft,
+        "final": edited,
+        "metrics": metrics,
+        "passed_heuristics": ok,
+    }
 
-# ---------------- CLI ----------------
+# -------------------- CLI --------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Artikel-Generator (Claude) — strikte Struktur & Dedupe.")
+    parser = argparse.ArgumentParser(description="Artikel-Generator mit fester Struktur + SEO + Ich/du (Claude).")
     parser.add_argument("--topic", required=True, help="Thema / Titel-Idee")
     parser.add_argument("--details", required=True, help="Pflichtdetails (kommasepariert)")
     parser.add_argument("--primary_kw", default="", help="Primär-Keyword (SEO). Standard: topic")
@@ -905,7 +743,10 @@ def main():
     parser.add_argument("--min-words", type=int, default=700, help="Minimale Wortzahl")
     parser.add_argument("--max-words", type=int, default=1000, help="Maximale Wortzahl")
     parser.add_argument("--destination", default="", help="Reiseziel für die Hintergrund-Story (z. B. Israel)")
-    parser.add_argument("--travel_angle", default="Vanlife/Rundreise", help="Reiseperspektive (z. B. Campen, Roadtrip)")
+    parser.add_argument("--travel_angle", default="Vanlife/Rundreise", help="Reiseperspektive (z. B. Campen, Roadtrip, Städtetrip)")
+    parser.add_argument("--story_mode", choices=["auto","travel","history","none"], default="auto", help="Erzähllogik")
+    parser.add_argument("--story_len", choices=["short","medium","long"], default="medium", help="Länge der Mini-Story")
+    parser.add_argument("--story_places", default="", help="Konkrete Orte/Routen/Details, kommasepariert")
     parser.add_argument("--out", default="out.md", help="Zieldatei (Markdown)")
     parser.add_argument("--show-draft", action="store_true", help="Draft zusätzlich speichern")
     args = parser.parse_args()
@@ -915,7 +756,8 @@ def main():
             args.topic, args.details,
             primary_kw=args.primary_kw, secondary_kws=args.secondary_kws,
             model=args.model, min_words=args.min_words, max_words=args.max_words,
-            destination=args.destination, travel_angle=args.travel_angle
+            destination=args.destination, travel_angle=args.travel_angle,
+            story_mode=args.story_mode, story_len=args.story_len, story_places=args.story_places
         )
     except anthropic.APIStatusError as e:
         print("Anthropic API-Fehler:", e)
@@ -932,11 +774,12 @@ def main():
         with open(draft_path, "w", encoding="utf-8") as f:
             f.write(result["draft"].strip() + "\n")
 
-    print("# --- Humanizer Pipeline (Struktur+SEO / Claude) ---")
-    print("Heuristiken/Struktur/SEO OK:", result["passed_heuristics"])
+    print("# --- Humanizer Pipeline (Struktur + SEO / Claude) ---")
+    print("Heuristiken/Struktur/Story OK:", result["passed_heuristics"])
     print("Metriken:", json.dumps(result["metrics"], ensure_ascii=False, indent=2))
     print(f"Finaler Text gespeichert in: {args.out}")
     print("Kohärenz:", json.dumps(result["metrics"].get("coherence", {}), ensure_ascii=False))
+    print("Story-Reqs:", json.dumps(result["metrics"].get("story_requirements", {}), ensure_ascii=False))
 
 if __name__ == "__main__":
     main()
